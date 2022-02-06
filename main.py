@@ -12,7 +12,7 @@ import torch.optim as optim
 from jiwer import wer
 
 
-def setup_optimizer(params, lr=0.001, beta=0.9, weight_decay=0.):
+def setup_optimizer(params, lr=0.0003, beta=0.9, weight_decay=0.):
     return optim.Adam(params,
             lr=lr,
             betas=(beta, 0.999),
@@ -26,13 +26,13 @@ def softmax_entropy(x, dim=2):
 def configure_model(model):
     """Configure model for use with tent."""
     # train mode, because tent optimizes the model to minimize entropy
-    model.train()
+    # model.train()
     # disable grad, to (re-)enable only what tent updates
     model.requires_grad_(False)
     # configure norm for tent updates: enable grad + force batch statisics
-    for m in model.modules():
-        if isinstance(m, nn.LayerNorm):
-            m.requires_grad_(True)
+    # for m in model.modules():
+        # if isinstance(m, nn.LayerNorm):
+            # m.requires_grad_(True)
             # force use of batch stats in train and eval modes
             # m.track_running_stats = False
             # m.running_mean = None
@@ -53,12 +53,10 @@ def collect_params(model):
         if isinstance(m, nn.LayerNorm):
             for np, p in m.named_parameters():
                 if np in ['weight', 'bias']:  # weight is scale, bias is shift
+                    # if nm.split('.')[-1] == 'final_layer_norm':
+                    p.requires_grad = True
                     params.append(p)
                     names.append(f"{nm}.{np}")
-                    # p.requires_grad = True
-        # else: 
-        #     for np, p in m.named_parameters():
-        #         p.requires_grad = False
             
     return params, names
 
@@ -75,6 +73,9 @@ def forward_and_adapt(x, model, optimizer):
     loss.backward()
     optimizer.step()
     optimizer.zero_grad()
+    # inference again
+    with torch.no_grad():
+        outputs = model(x).logits
     return outputs
 
 
@@ -101,7 +102,7 @@ if __name__ == '__main__':
         batch["speech"] = speech
         return batch
 
-    librispeech_eval = librispeech_eval.map(map_to_array)
+    librispeech_eval = librispeech_eval.map(map_to_array, keep_in_memory=False)
 
     # tokenize
     # input_values = processor(ds[0]["audio"]["array"], return_tensors="pt", padding="longest").input_values.cuda()  # Batch size 1
@@ -110,34 +111,28 @@ if __name__ == '__main__':
     model = configure_model(model)
     params, param_names = collect_params(model)
     optimizer = setup_optimizer(params)
-
+    # param_grads = [p.requires_grad for p in model.parameters()]
+    print(param_names)
     def map_to_pred(batch):
         input_values = processor(batch["speech"], return_tensors="pt", padding="longest").input_values.cuda()
         # with torch.no_grad():
         #     logits = model(input_values.to("cuda")).logits
 
-           # iteration 
+        # iteration 
         for _ in range(steps): 
             outputs = forward_and_adapt(input_values, model, optimizer)
+
         predicted_ids = torch.argmax(outputs, dim=-1)
         transcription = processor.batch_decode(predicted_ids)
         batch["transcription"] = transcription
 
-        del outputs
+        del outputs, input_values
         return batch
 
-    result = librispeech_eval.map(map_to_pred, batched=True, batch_size=2)
+    result = librispeech_eval.map(map_to_pred, batched=True, batch_size=1, keep_in_memory=False)
 
-    # print("WER:", wer(result["text"], result["transcription"]))
+    print("WER:", wer(result["text"], result["transcription"]))
 
-
-    # print(param_names)
-
- 
-
-
-    # predicted_ids = torch.argmax(outputs, dim=-1)
-    # transcription = processor.batch_decode(predicted_ids)
 
 
 
