@@ -19,22 +19,19 @@ def read_text(file):
 
 
 class LibriDataset(Dataset):
-    def __init__(self, split, tokenizer, bucket_size, path, ascending=False, **kwargs):
+    def __init__(self, split, bucket_size, path, ascending=False):
         # Setup
         self.path = path
         self.bucket_size = bucket_size
 
         # List all wave files
-        file_list = []
-        for s in split:
-            split_list = list(Path(join(path, s)).rglob("*.flac"))
-            assert len(split_list) > 0, "No data found @ {}".format(join(path,s))
-            file_list += split_list
+        split_list = list(Path(join(path, split)).rglob("*.flac"))
+        file_list = split_list
         
         text = []
         for f in tqdm(file_list, desc='Read text'):
             transcription = read_text(str(f))
-            text.append(tokenizer.encode(transcription))
+            text.append(transcription)
 
         self.file_list, self.text = zip(*[(f_name, txt)
                                           for f_name, txt in sorted(zip(file_list, text), reverse=not ascending, key=lambda x:len(x[1]))])

@@ -89,34 +89,21 @@ if __name__ == '__main__':
     steps = 1
     # load model and tokenizer
     processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h", sampling_rate=SAMPLE_RATE)
-    model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-base-960h").eval().cuda()
-        
-    # load dummy dataset and read soundfiles
-    librispeech_eval = load_dataset("patrickvonplaten/librispeech_asr_dummy", "clean", split="validation")
-    # print(ds)
-    # librispeech_eval = load_dataset("librispeech_asr", "other", split="test")
-    # next(iter(librispeech_eval))
-
-    def map_to_array(batch):
-        speech, _ = sf.read(batch["file"])
-        batch["speech"] = speech
-        return batch
-
-    librispeech_eval = librispeech_eval.map(map_to_array, keep_in_memory=False)
-
-    # tokenize
-    # input_values = processor(ds[0]["audio"]["array"], return_tensors="pt", padding="longest").input_values.cuda()  # Batch size 1
+    model = Wav2Vec2ForCTC.from_pretrained("facebook/wav2vec2-base-960h").eval().cuda()        
 
     # set up for tent
     model = configure_model(model)
     params, param_names = collect_params(model)
     optimizer = setup_optimizer(params)
-    # param_grads = [p.requires_grad for p in model.parameters()]
-    print(param_names)
-    def map_to_pred(batch):
-        input_values = processor(batch["speech"], return_tensors="pt", padding="longest").input_values.cuda()
-        # with torch.no_grad():
-        #     logits = model(input_values.to("cuda")).logits
+    # # param_grads = [p.requires_grad for p in model.parameters()]
+    # print(param_names)
+    from data import load_dataset
+    dataset = load_dataset('test-other', 'librispeech', '/home/daniel094144/Daniel/data/LibriSpeech', 1)
+    transcriptions = []
+    gt_texts = []
+    for batch in dataset:
+        wavs, texts, files = batch
+        input_values = processor(wavs, return_tensors="pt", padding="longest").input_values.cuda()
 
         # iteration 
         for _ in range(steps): 
@@ -124,14 +111,11 @@ if __name__ == '__main__':
 
         predicted_ids = torch.argmax(outputs, dim=-1)
         transcription = processor.batch_decode(predicted_ids)
-        batch["transcription"] = transcription
+        # print(transcription, texts)  
+        transcriptions.append(transcription)
+        gt_texts.append(texts)
 
-        del outputs, input_values
-        return batch
-
-    result = librispeech_eval.map(map_to_pred, batched=True, batch_size=1, keep_in_memory=False)
-
-    print("WER:", wer(result["text"], result["transcription"]))
+    # print("WER:", wer(result["text"], result["transcription"]))
 
 
 
