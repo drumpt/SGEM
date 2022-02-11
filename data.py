@@ -1,11 +1,10 @@
 import torch
+torch.manual_seed(0)
 import torchaudio
 from functools import partial
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.distributed import is_initialized
 from torch.nn.utils.rnn import pad_sequence
-
-EVAL_BATCH_SIZE = 12
 
 
 def collect_audio_batch(batch, split, half_batch_size_wav_len=300000):
@@ -14,7 +13,9 @@ def collect_audio_batch(batch, split, half_batch_size_wav_len=300000):
     '''
     def audio_reader(filepath):
         wav, sample_rate = torchaudio.load(filepath)
-        return wav.reshape(-1)
+        wav = wav.reshape(-1)
+        # wav += 0.01 * torch.randn_like(wav)
+        return wav
 
     # Bucketed batch should be [[(file1,txt1),(file2,txt2),...]]
     if type(batch[0]) is not tuple:
@@ -40,7 +41,7 @@ def collect_audio_batch(batch, split, half_batch_size_wav_len=300000):
     audio_len, file, audio_feat, text = zip(*[(feat_len, f_name, feat, txt)
                                               for feat_len, f_name, feat, txt in sorted(zip(audio_len, file, audio_feat, text), reverse=True, key=lambda x:x[0])])
 
-    return audio_feat, text, file
+    return audio_len, audio_feat, text, file
 
 
 def create_dataset(split, name, path, batch_size=12):
