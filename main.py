@@ -1,6 +1,7 @@
 from importlib.util import module_for_loader
 import os 
 import glob
+import re
 from tqdm import tqdm 
 import soundfile as sf
 import torch
@@ -26,6 +27,22 @@ def setup_optimizer(params, opt_name='Adam', lr=1e-4, beta=0.9, weight_decay=0.)
 def softmax_entropy(x, dim=2):
     # Entropy of softmax distribution from logits
     return -(x.softmax(dim) * x.log_softmax(dim)).sum(dim)
+
+def mcc_loss(x, reweight=True, dim=2, class_num=32):
+    
+    p = x.softmax(dim) # (1, L, D)
+    p = p.squeeze(0) # (L, D)
+    if reweight: # (1, L, D) * (L, 1) 
+        target_entropy_weight = softmax_entropy(x, dim=2).detach().squeeze(0) # instance-wise entropy (1, L, D)
+        target_entropy_weight = 1 + torch.exp(-target_entropy_weight) # (1, L)
+        target_entropy_weight = x.shape[1] * target_entropy_weight / torch.sum(target_entropy_weight)
+        cov_matrix_t = p.mul(target_entropy_weight.view(-1, 1)).transpose(1, 0).mm(p)
+
+    else: 
+        cov_matrix_t = p.transpose(1, 0).mm(p) # (D, L) * (L, D) = (D, D)
+    cov_matrix_t = cov_matrix_t / torch.sum(cov_matrix_t, dim=1)
+    mcc_loss = (torch.sum(cov_matrix_t) - torch.trace(cov_matrix_t)) / class_num
+    return mcc_loss
 
 def collect_params(model):
     """Collect the affine scale + shift parameters from batch norms.
@@ -60,27 +77,30 @@ def load_model_and_optimizer(model, optimizer, model_state, optimizer_state):
     model.load_state_dict(model_state, strict=True)
     optimizer.load_state_dict(optimizer_state)
 
-def forward_and_adapt(x, model, optimizer, mask):
+def forward_and_adapt(x, model, optimizer, mask, em_coef=0.9, reweight=False, temp=1., repeat_inference=False):
     """Forward and adapt model on batch of data.
 
     Measure entropy of the model prediction, take gradients, and update params.
     """
     # forward
-    outputs = model(x).logits
-    # # B, L, D
-    # print(outputs.shape, mask.shape)
+    outputs = model(x).logits / temp
     # adapt
-    try: 
-        loss = softmax_entropy(outputs)[mask].mean(0).mean()
-    except: 
-        loss = softmax_entropy(outputs)[mask[:, :-1]].mean(0).mean()
-    # print(loss)
+    loss = 0
+    if em_coef > 0: 
+        try: 
+            loss += softmax_entropy(outputs)[mask].mean(0).mean() * em_coef
+        except: 
+            loss += softmax_entropy(outputs)[mask[:, :-1]].mean(0).mean() * em_coef
+    if 1 - em_coef > 0: 
+        loss += mcc_loss(outputs, reweight) * (1 - em_coef)
+    # print(loss) 
     loss.backward()
     optimizer.step()
     optimizer.zero_grad()
     # inference again
-    # with torch.no_grad():
-    #     outputs = model(x).logits
+    if repeat_inference:
+        with torch.no_grad():
+            outputs = model(x).logits
     return outputs
 
 
@@ -98,6 +118,10 @@ if __name__ == '__main__':
     dataset_name = 'librispeech'
     split = 'test-other'
     lr = 1e-4
+    em_coef = 1.
+    reweight = False
+    batch_size = 1
+    temp =  2
 
     # load model and tokenizer
     processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h", sampling_rate=SAMPLE_RATE, return_attention_mask=True)
@@ -112,7 +136,7 @@ if __name__ == '__main__':
 
     print(param_names)
     from data import load_dataset
-    dataset = load_dataset(split, dataset_name, dataset_dir, 1)
+    dataset = load_dataset(split, dataset_name, dataset_dir, batch_size)
     transcriptions = []
     gt_texts = []
     for batch in dataset:
@@ -127,17 +151,24 @@ if __name__ == '__main__':
             load_model_and_optimizer(model, optimizer, model_state, optimizer_state)
         # iteration 
         for i in range(steps): 
-            outputs = forward_and_adapt(input_values, model, optimizer, mask.bool())
+            outputs = forward_and_adapt(input_values, model, optimizer, mask.bool(), em_coef, reweight, temp)
             if episodic: 
                 if i == 0: 
                     ori = outputs
                     predicted_ids = torch.argmax(ori, dim=-1)
-                    transcription = processor.batch_decode(predicted_ids)
-                    print("original WER:", wer(list(texts), list(transcription)))
+                    ori_transcription = processor.batch_decode(predicted_ids)
+                    ori_wer = wer(list(texts), list(ori_transcription))
+                    print("original WER:", ori_wer)
 
         predicted_ids = torch.argmax(outputs, dim=-1)
         transcription = processor.batch_decode(predicted_ids)
-        print("adapted WER: ", wer(list(texts), list(transcription)))
+        ada_wer = wer(list(texts), list(transcription))
+        print("adapted WER: ", ada_wer)
+        # if ada_wer < ori_wer:
+        #     print(texts)
+        #     print(ori_transcription)
+        #     print(transcription)
+
         transcriptions += transcription
         gt_texts += texts
 
@@ -147,6 +178,10 @@ if __name__ == '__main__':
     print(f'lr = {lr}')
     print(f'optim = {opt}')
     print(f'step = {steps}')
+    print(f'em_coef = {em_coef}')
+    print(f'reweight = {reweight}')
+    print(f'batch size = {batch_size}')
+    print(f'temperature = {temp}')
     print('------------------------------------')
 
 

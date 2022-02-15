@@ -14,7 +14,7 @@ def collect_audio_batch(batch, split, half_batch_size_wav_len=300000):
     def audio_reader(filepath):
         wav, sample_rate = torchaudio.load(filepath)
         wav = wav.reshape(-1)
-        # wav += 0.01 * torch.randn_like(wav)
+        wav += 0.005 * torch.randn_like(wav)
         return wav
 
     # Bucketed batch should be [[(file1,txt1),(file2,txt2),...]]
@@ -71,6 +71,3 @@ def load_dataset(split=None, name='librispeech', path=None, batch_size=12, num_w
     dataloader = DataLoader(dataset, batch_size=loader_bs, shuffle=False,
                             collate_fn=collate_fn, num_workers=num_workers)
     return dataloader
-
-if __name__ == '__main__':
-    dataset = load_dataset('test-other', 'librispeech', '/home/daniel094144/Daniel/data/LibriSpeech', 12)
