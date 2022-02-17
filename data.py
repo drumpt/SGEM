@@ -14,7 +14,7 @@ def collect_audio_batch(batch, split, half_batch_size_wav_len=300000):
     def audio_reader(filepath):
         wav, sample_rate = torchaudio.load(filepath)
         wav = wav.reshape(-1)
-        wav += 0.005 * torch.randn_like(wav)
+        wav += 0.01 * torch.randn_like(wav)
         return wav
 
     # Bucketed batch should be [[(file1,txt1),(file2,txt2),...]]
@@ -50,8 +50,8 @@ def create_dataset(split, name, path, batch_size=12):
     # Recognize corpus
     if name.lower() == "librispeech":
         from librispeech import LibriDataset as Dataset
-    # elif name.lower() == "snips":
-    #     from .corpus.snips import SnipsDataset as Dataset
+    elif name.lower() == "chime":
+        from CHiME import CHiMEDataset as Dataset
     # elif name.lower() == 'libriphone':
     #     from .corpus.libriphone import LibriPhoneDataset as Dataset
     else:
@@ -59,6 +59,7 @@ def create_dataset(split, name, path, batch_size=12):
 
     loader_bs = batch_size
     dataset = Dataset(split, batch_size, path)
+    print(f'[INFO]    There are {len(dataset)} samples.')
 
     return dataset, loader_bs
 

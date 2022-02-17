@@ -25,7 +25,7 @@ class LibriDataset(Dataset):
         self.bucket_size = bucket_size
 
         # List all wave files
-        split_list = list(Path(join(path, split)).rglob("*.flac"))
+        split_list = list(Path(join(path, split)).rglob("*.wav"))
         file_list = split_list
         
         text = []
