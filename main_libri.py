@@ -94,21 +94,26 @@ def configure_model(model):
     model.requires_grad_(False)
     return model
 
-def forward_and_adapt(x, model, optimizer, mask, em_coef=0.9, reweight=False, temp=1., repeat_inference=False):
+def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1., not_blank=True, repeat_inference=False):
     """Forward and adapt model on batch of data.
 
     Measure entropy of the model prediction, take gradients, and update params.
+
+    the index of <pad> in vocab is 0
     """
     # forward
     outputs = model(x).logits / temp
+    predicted_ids = torch.argmax(outputs, dim=-1)
     # adapt
     loss = 0
 
     if em_coef > 0: 
-        try: 
-            loss += softmax_entropy(outputs)[mask].mean(0).mean() * em_coef
-        except: 
-            loss += softmax_entropy(outputs)[mask[:, :-1]].mean(0).mean() * em_coef
+        if not_blank: 
+            non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
+            loss += softmax_entropy(outputs)[non_blank].mean(0).mean() * em_coef
+        else: 
+            loss += softmax_entropy(outputs).mean(0).mean() * em_coef
+            
     if 1 - em_coef > 0: 
         loss += mcc_loss(outputs, reweight) * (1 - em_coef)
     # print(loss) 
@@ -130,23 +135,26 @@ if __name__ == '__main__':
     SAMPLE_RATE = 16000
     asr = "facebook/wav2vec2-base-960h"
     # asr = "facebook/wav2vec2-large-960h-lv60-self"
+    # asr = "facebook/wav2vec2-large-960h-lv60"
+    # asr = "facebook/wav2vec2-large-robust-ft-swbd-300h"
     steps = 40
     episodic = True
     opt = 'Adam'
-    # dataset_dir = '/home/daniel094144/data/LibriSpeech'
-    dataset_dir = '/home/daniel094144/data/CHiME3'
-    # dataset_name = 'librispeech'
-    dataset_name = 'chime'
-    # split = 'test-other'
+    dataset_dir = '/home/daniel094144/data/LibriSpeech'
+    # dataset_dir = '/home/daniel094144/data/CHiME3'
+    dataset_name = 'librispeech'
+    # dataset_name = 'chime'
+    split = 'test-other'
+    # split = ['et05_bus_real', 'et05_bus_simu', 'et05_caf_real', 'et05_caf_simu', 'et05_ped_simu', 'et05_str_real', 'et05_str_simu']
 
-    split = ['et05_bus_real', 'et05_bus_simu', 'et05_caf_real', 'et05_caf_simu', 'et05_ped_simu', 'et05_str_real', 'et05_str_simu']
     lr = 1e-4
     em_coef = 1.
     reweight = False
     batch_size = 1
-    temp =  3.
+    temp =  2.5
+    non_blank = True
     log_dir = './logs'
-    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr
+    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)
 
     from data import load_dataset
     dataset = load_dataset(split, dataset_name, dataset_dir, batch_size)
@@ -173,8 +181,8 @@ if __name__ == '__main__':
         lens, wavs, texts, files = batch
         
         inputs = processor(wavs, return_tensors="pt", padding="longest")
-        mask = inputs.attention_mask
-        mask = mask[:, ::320][:, :-1]
+        # mask = inputs.attention_mask
+        # mask = mask[:, ::320][:, :-1]
         
         input_values = inputs.input_values.cuda()
         
@@ -183,7 +191,7 @@ if __name__ == '__main__':
         
         # iteration 
         for i in range(steps): 
-            outputs = forward_and_adapt(input_values, model, optimizer, mask.bool(), em_coef, reweight, temp)
+            outputs = forward_and_adapt(input_values, model, optimizer, em_coef, reweight, temp)
             if episodic: 
                 if i == 0: 
                     ori = outputs
@@ -192,7 +200,8 @@ if __name__ == '__main__':
                     ori_transcriptions += ori_transcription
                     ori_wer = wer(list(texts), list(ori_transcription))
                     print("original WER:", ori_wer)
-            # print(outputs.softmax(2).max(2))
+                    # print(outputs.softmax(2).max(2))
+                    # print(predicted_ids)
         predicted_ids = torch.argmax(outputs, dim=-1)
         transcription = processor.batch_decode(predicted_ids)
         ada_wer = wer(list(texts), list(transcription))
@@ -217,6 +226,7 @@ if __name__ == '__main__':
     print(f'reweight = {reweight}')
     print(f'batch size = {batch_size}')
     print(f'temperature = {temp}')
+    print(f'non_blank = {str(non_blank)}')
     print('------------------------------------')
 
     with open(os.path.join(log_dir, exp_name), 'w') as f: 
@@ -230,6 +240,7 @@ if __name__ == '__main__':
         f.write(f'reweight = {reweight}\n')
         f.write(f'batch size = {batch_size}\n')
         f.write(f'temperature = {temp}\n')
+        f.write(f'non_blank = {str(non_blank)}')
 
     
 

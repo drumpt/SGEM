@@ -1,3 +1,4 @@
+from unicodedata import name
 from tqdm import tqdm
 from pathlib import Path
 import os
@@ -5,33 +6,35 @@ from joblib import Parallel, delayed
 from torch.utils.data import Dataset
 
 
-def read_text(file):
+def read_text(tpath, file):
     '''Get transcription of target wave file, 
        it's somewhat redundant for accessing each txt multiplt times,
        but it works fine with multi-thread'''
-    src_file = '-'.join(file.split('-')[:-1])+'.trans.txt'
-    idx = file.split('/')[-1].split('.')[0]
+    txt_list = os.path.join(tpath, "".join("/".join(file.split('/')[-2:]).split(".")[:-1])+'.trn')
 
-    with open(src_file, 'r') as fp:
+    with open(txt_list, 'r') as fp:
         for line in fp:
-            if idx == line.split(' ')[0]:
-                return line[:-1].split(' ', 1)[1]
+            return ' '.join(line.split(' ')[1:]).strip('\n')
+            
 
 
-class LibriDataset(Dataset):
-    def __init__(self, split, bucket_size, path, ascending=False):
+class CHiMEDataset(Dataset):
+    def __init__(self, split, bucket_size, path="/home/daniel094144/data/CHiME3", ascending=False):
         # Setup
         self.path = path
         self.bucket_size = bucket_size
         
-        # List all wave files
-        split_list = list(Path(os.path.join(path, split)).rglob("*.flac"))
-    
-        file_list = split_list
+        apath = path + "/data/audio/16kHz/enhanced"
+        tpath = path + "/data/transcriptions"
+
+        file_list = []
+        for s in split: 
+            split_list = list(Path(os.path.join(apath, s)).rglob("*.wav"))
+            file_list += split_list
         
         text = []
         for f in tqdm(file_list, desc='Read text'):
-            transcription = read_text(str(f))
+            transcription = read_text(tpath, str(f))
             text.append(transcription)
 
         self.file_list, self.text = zip(*[(f_name, txt)
