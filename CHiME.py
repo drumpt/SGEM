@@ -24,6 +24,7 @@ class CHiMEDataset(Dataset):
         self.path = path
         self.bucket_size = bucket_size
         
+        split = ['et05_bus_real', 'et05_bus_simu', 'et05_caf_real', 'et05_caf_simu', 'et05_ped_simu', 'et05_str_real', 'et05_str_simu']
         apath = path + "/data/audio/16kHz/enhanced"
         tpath = path + "/data/transcriptions"
 

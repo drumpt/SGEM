@@ -23,11 +23,12 @@ class LibriDataset(Dataset):
         # Setup
         self.path = path
         self.bucket_size = bucket_size
-        
+        split = ['test-other']
         # List all wave files
-        split_list = list(Path(os.path.join(path, split)).rglob("*.flac"))
-    
-        file_list = split_list
+        file_list = []
+        for s in split: 
+            split_list = list(Path(os.path.join(path, s)).rglob("*.flac"))
+            file_list += split_list
         
         text = []
         for f in tqdm(file_list, desc='Read text'):
