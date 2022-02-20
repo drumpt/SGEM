@@ -6,15 +6,16 @@ from torch.utils.data import DataLoader, DistributedSampler
 from torch.distributed import is_initialized
 from torch.nn.utils.rnn import pad_sequence
 
+SAMPLE_RATE = 16000
 
-def collect_audio_batch(batch, split, half_batch_size_wav_len=300000):
+def collect_audio_batch(batch, extra_noise=0., half_batch_size_wav_len=300000):
     '''Collects a batch, should be list of tuples (audio_path <str>, list of int token <list>) 
        e.g. [(file1,txt1),(file2,txt2),...]
     '''
     def audio_reader(filepath):
         wav, sample_rate = torchaudio.load(filepath)
         wav = wav.reshape(-1)
-        wav += 0.01 * torch.randn_like(wav)
+        wav += extra_noise * torch.randn_like(wav)
         return wav
 
     # Bucketed batch should be [[(file1,txt1),(file2,txt2),...]]
@@ -23,9 +24,6 @@ def collect_audio_batch(batch, split, half_batch_size_wav_len=300000):
 
     # Make sure that batch size is reasonable
     first_len = audio_reader(str(batch[0][0])).size(0)
-    if split == 'train':
-        if first_len > half_batch_size_wav_len and len(batch) > 1:
-            batch = batch[:len(batch)//2]
 
     # Read batch
     file, audio_feat, audio_len, text = [], [], [], []
@@ -64,10 +62,10 @@ def create_dataset(split, name, path, batch_size=12):
     return dataset, loader_bs
 
 
-def load_dataset(split=None, name='librispeech', path=None, batch_size=12, num_workers=4):
+def load_dataset(split=None, name='librispeech', path=None, batch_size=12, extra_noise=0., num_workers=4):
     ''' Prepare dataloader for training/validation'''
     dataset, loader_bs = create_dataset(split, name, path, batch_size)
-    collate_fn = partial(collect_audio_batch, split=split)
+    collate_fn = partial(collect_audio_batch, extra_noise=extra_noise)
 
     dataloader = DataLoader(dataset, batch_size=loader_bs, shuffle=False,
                             collate_fn=collate_fn, num_workers=num_workers)
