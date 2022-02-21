@@ -36,8 +36,7 @@ def softmax_entropy(x, dim=2):
     # Entropy of softmax distribution from logits
     return -(x.softmax(dim) * x.log_softmax(dim)).sum(dim)
 
-def mcc_loss(x, reweight=True, dim=2, class_num=32):
-    
+def mcc_loss(x, reweight=False, dim=2, class_num=32):
     p = x.softmax(dim) # (1, L, D)
     p = p.squeeze(0) # (L, D)
     if reweight: # (1, L, D) * (L, 1) 
@@ -45,11 +44,12 @@ def mcc_loss(x, reweight=True, dim=2, class_num=32):
         target_entropy_weight = 1 + torch.exp(-target_entropy_weight) # (1, L)
         target_entropy_weight = x.shape[1] * target_entropy_weight / torch.sum(target_entropy_weight)
         cov_matrix_t = p.mul(target_entropy_weight.view(-1, 1)).transpose(1, 0).mm(p)
+    else:    
+        cov_matrix_t = p.transpose(1, 0).mm(p) # (D, L) * (L, D) -> (D, D)
 
-    else: 
-        cov_matrix_t = p.transpose(1, 0).mm(p) # (D, L) * (L, D) = (D, D)
     cov_matrix_t = cov_matrix_t / torch.sum(cov_matrix_t, dim=1)
     mcc_loss = (torch.sum(cov_matrix_t) - torch.trace(cov_matrix_t)) / class_num
+   
     return mcc_loss
 
 def collect_params(model):
@@ -213,7 +213,7 @@ if __name__ == '__main__':
     extra_noise = args.extra_noise
     scheduler = args.scheduler
 
-    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)+'_noise_'+str(extra_noise)
+    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)+'_noise_'+str(extra_noise)+'_rew_'+str(reweight)
 
     from data import load_dataset
     dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise)
@@ -263,7 +263,7 @@ if __name__ == '__main__':
         
         # iteration 
         for i in range(steps): 
-            outputs = forward_and_adapt(input_values, model, optimizer, em_coef, reweight, temp, True, scheduler)
+            outputs = forward_and_adapt(input_values, model, optimizer, em_coef, reweight, temp, non_blank, scheduler)
             if episodic: 
                 if i == 0: 
                     ori = outputs
