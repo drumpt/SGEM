@@ -127,11 +127,13 @@ def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1.,
         if not_blank: 
             non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
             loss += softmax_entropy(outputs)[non_blank].mean(0).mean() * em_coef
+    
         else: 
             loss += softmax_entropy(outputs).mean(0).mean() * em_coef
             
     if 1 - em_coef > 0: 
         loss += mcc_loss(outputs, reweight) * (1 - em_coef)
+    
     # print(loss) 
     loss.backward()
     # grad = cal_grad(model)
