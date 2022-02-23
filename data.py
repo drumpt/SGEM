@@ -50,8 +50,9 @@ def create_dataset(split, name, path, batch_size=12):
         from librispeech import LibriDataset as Dataset
     elif name.lower() == "chime":
         from CHiME import CHiMEDataset as Dataset
-    # elif name.lower() == 'libriphone':
-    #     from .corpus.libriphone import LibriPhoneDataset as Dataset
+    elif name.lower() == "swbd":
+        from switchboard import SwbdDataset as Dataset
+        
     else:
         raise NotImplementedError
 
