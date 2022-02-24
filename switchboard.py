@@ -15,12 +15,12 @@ def read_text(tpath, file):
 
     with open(txt_list, 'r') as fp:
         for line in fp:
-            return ' '.join(line.split(' ')[1:]).strip('\n')
+            return line.strip('\n')
             
 
 
 class SwbdDataset(Dataset):
-    def __init__(self, split, bucket_size, path="/home/daniel094144/data/Switchboard", ascending=False):
+    def __init__(self, split, bucket_size, path="/home/daniel094144/data/Switchboard", ascending=True):
         # Setup
         self.path = path
         self.bucket_size = bucket_size
@@ -38,8 +38,11 @@ class SwbdDataset(Dataset):
         filtered_file_list = []
         for f in tqdm(file_list, desc='Read text'):
             transcription = read_text(tpath, str(f))
+            print(transcription)
             if transcription == None: 
                 pass
+            # elif len(transcription.split()) <= 3:
+            #     pass
             else:
                 filtered_file_list.append(f)
                 text.append(transcription)
