@@ -52,6 +52,24 @@ def mcc_loss(x, reweight=False, dim=2, class_num=32):
    
     return mcc_loss
 
+def div_loss(x, non_blank=None, L_thd=64):
+    # maximize entropy of class prediction for every time-step in a utterance 
+    # x (1, L, D)
+    loss = 0
+    x = x.squeeze(0)
+    L = x.shape[0]
+
+    if non_blank is not None: 
+        cls_pred = x.mean(0)[1:] # (D, )
+    else:
+        cls_pred = x.mean(0) # (D, )
+
+    # if L < 64:     
+    # loss = -softmax_entropy(cls_pred, 0) / (L / L_thd)
+    loss = -softmax_entropy(cls_pred, 0)
+
+    return loss
+
 def collect_params(model):
     """Collect the affine scale + shift parameters from batch norms.
 
@@ -110,7 +128,7 @@ def configure_model(model):
     model.requires_grad_(False)
     return model
 
-def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1., not_blank=True, scheduler=None, repeat_inference=False):
+def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1., not_blank=True, scheduler=None, div_coef=0, repeat_inference=False):
     """Forward and adapt model on batch of data.
 
     Measure entropy of the model prediction, take gradients, and update params.
@@ -118,23 +136,30 @@ def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1.,
     the index of <pad> in vocab is 0
     """
     # forward
-    outputs = model(x).logits / temp
+    outputs = model(x).logits
     predicted_ids = torch.argmax(outputs, dim=-1)
+    non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
     # adapt
     loss = 0
 
     if em_coef > 0: 
-        if not_blank: 
-            non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
-            loss += softmax_entropy(outputs)[non_blank].mean(0).mean() * em_coef
+        if not_blank:      
+            e_loss = softmax_entropy(outputs / temp)[non_blank].mean(0).mean()
     
         else: 
-            loss += softmax_entropy(outputs).mean(0).mean() * em_coef
-            
+            e_loss = softmax_entropy(outputs / temp).mean(0).mean() 
+        
+        loss += e_loss * em_coef
+
     if 1 - em_coef > 0: 
-        loss += mcc_loss(outputs, reweight) * (1 - em_coef)
+        c_loss = mcc_loss(outputs / temp, reweight)
+        loss += c_loss * (1 - em_coef)
+
+    if div_coef > 0: 
+        d_loss = div_loss(outputs, not_blank) 
+        loss += d_loss * div_coef 
+    # print(f'e_loss = {e_loss}; c_loss = {c_loss}; d_loss = {d_loss}') 
     
-    # print(loss) 
     loss.backward()
     # grad = cal_grad(model)
     # print(grad)
@@ -158,6 +183,7 @@ if __name__ == '__main__':
     parser.add_argument('--asr', type=str, default="facebook/wav2vec2-base-960h")
     parser.add_argument('--steps', type=int, default=40)
     parser.add_argument('--episodic', action='store_true')
+    parser.add_argument('--div_coef', type=float, default=0.)
     parser.add_argument('--opt', type=str, default='Adam')
     parser.add_argument('--dataset_name', type=str, default='librispeech')
     parser.add_argument('--dataset_dir', type=str, default='/home/daniel094144/data/LibriSpeech')
@@ -214,8 +240,9 @@ if __name__ == '__main__':
     log_dir = args.log_dir
     extra_noise = args.extra_noise
     scheduler = args.scheduler
+    div_coef = args.div_coef
 
-    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)+'_noise_'+str(extra_noise)+'_rew_'+str(reweight)
+    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)+'_noise_'+str(extra_noise)+'_rew_'+str(reweight)+'_div_'+str(div_coef)
 
     from data import load_dataset
     dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise)
@@ -238,6 +265,7 @@ if __name__ == '__main__':
     print(f'non_blank = {str(non_blank)}')
     print(f'extra_noise = {extra_noise}')
     print(f'scheduler = {str(scheduler)}')
+    print(f'div_coef = {str(div_coef)}')
 
     # load model and tokenizer
     processor = Wav2Vec2Processor.from_pretrained(asr, sampling_rate=SAMPLE_RATE, return_attention_mask=True)
@@ -265,7 +293,7 @@ if __name__ == '__main__':
         
         # iteration 
         for i in range(steps): 
-            outputs = forward_and_adapt(input_values, model, optimizer, em_coef, reweight, temp, non_blank, scheduler)
+            outputs = forward_and_adapt(input_values, model, optimizer, em_coef, reweight, temp, non_blank, scheduler, div_coef)
             if episodic: 
                 if i == 0: 
                     ori = outputs
@@ -294,6 +322,8 @@ if __name__ == '__main__':
                     transcription = processor.batch_decode(predicted_ids)
                     ada_wer = wer(list(texts), list(transcription))
                     print("adapt-40 WER: ", ada_wer)
+                    # print(transcription)
+                    # print(texts)
                     transcriptions_40 += transcription
 
         gt_texts += texts
@@ -322,6 +352,7 @@ if __name__ == '__main__':
         f.write(f'non_blank = {str(non_blank)}\n')
         f.write(f'extra_noise = {extra_noise}\n')
         f.write(f'scheduler = {str(scheduler)}\n')
+        f.wrtie(f'div_coef = {str(div_coef)}\n')
 
     
 
