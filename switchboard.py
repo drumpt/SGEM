@@ -32,9 +32,9 @@ class SwbdDataset(Dataset):
         file_list = []
         for s in split: 
             if enhance: 
-                split_list = list(Path(os.path.join(os.path.join(apath, 'se_wav'), s)).rglob("*.wav"))
+                split_list = list(Path(os.path.join(os.path.join(apath, 'se_wav'), s)).glob("*.wav"))
             else:  
-                split_list = list(Path(os.path.join(apath, s)).rglob("*.wav"))
+                split_list = list(Path(os.path.join(apath, s)).glob("*.wav"))
             file_list += split_list
         
         text = []
