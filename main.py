@@ -207,6 +207,7 @@ if __name__ == '__main__':
     parser.add_argument('--em_coef', type=float, default=1.)
     parser.add_argument('--reweight', action='store_true')
     parser.add_argument('--bias_only', action='store_true')
+    parser.add_argument('--enhance', action='store_true')
     parser.add_argument('--train_feature', action='store_true')
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--temp', type=float, default=2.5)
@@ -214,6 +215,7 @@ if __name__ == '__main__':
     parser.add_argument('--log_dir', type=str, default='./exps')
     parser.add_argument('--extra_noise', type=float, default=0.)
     parser.add_argument('--scheduler', default=None)
+    
     
     # asr = "facebook/wav2vec2-base-960h"
     # asr = "facebook/wav2vec2-large-960h-lv60-self"
@@ -247,11 +249,12 @@ if __name__ == '__main__':
     div_coef = args.div_coef
     bias_only = args.bias_only
     train_feature = args.train_feature
+    enhance = args.enhance
 
-    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)+'_noise_'+str(extra_noise)+'_rew_'+str(reweight)+'_div_'+str(div_coef)+'_bias_'+str(bias_only)+'_feat_'+str(train_feature)
+    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)+'_noise_'+str(extra_noise)+'_rew_'+str(reweight)+'_div_'+str(div_coef)+'_bias_'+str(bias_only)+'_feat_'+str(train_feature)+'_se_'+str(enhance)
 
     from data import load_dataset
-    dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise)
+    dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise, enhance)
     transcriptions_10 = []
     transcriptions_20 = []
     transcriptions_40 = []
@@ -274,6 +277,7 @@ if __name__ == '__main__':
     print(f'div_coef = {str(div_coef)}')
     print(f'bias_only = {bias_only}')
     print(f'train_feature = {train_feature}')
+    print(f'enhance = {str(enhance)}')
 
     # load model and tokenizer
     processor = Wav2Vec2Processor.from_pretrained(asr, sampling_rate=SAMPLE_RATE, return_attention_mask=True)
@@ -339,16 +343,18 @@ if __name__ == '__main__':
 
     print("asr:", asr)
     print("original WER:", wer(gt_texts, ori_transcriptions))
-    print("TTA-10 WER:", wer(gt_texts, transcriptions_10))
-    print("TTA-20 WER:", wer(gt_texts, transcriptions_20))
-    print("TTA-40 WER:", wer(gt_texts, transcriptions_40))
+    if steps > 10: 
+        print("TTA-10 WER:", wer(gt_texts, transcriptions_10))
+        print("TTA-20 WER:", wer(gt_texts, transcriptions_20))
+        print("TTA-40 WER:", wer(gt_texts, transcriptions_40))
     print('------------------------------------')
 
     with open(os.path.join(log_dir, exp_name), 'w') as f: 
         f.write(f"original WER: {wer(gt_texts, ori_transcriptions)}\n")
-        f.write(f"TTA-10 WER: {wer(gt_texts, transcriptions_10)}\n")
-        f.write(f"TTA-20 WER: {wer(gt_texts, transcriptions_20)}\n")
-        f.write(f"TTA-40 WER: {wer(gt_texts, transcriptions_40)}\n")
+        if steps > 10: 
+            f.write(f"TTA-10 WER: {wer(gt_texts, transcriptions_10)}\n")
+            f.write(f"TTA-20 WER: {wer(gt_texts, transcriptions_20)}\n")
+            f.write(f"TTA-40 WER: {wer(gt_texts, transcriptions_40)}\n")
         f.write(f'eposidic? {episodic}\n')
         f.write(f'lr = {lr}\n')
         f.write(f'optim = {opt}\n')
@@ -363,6 +369,7 @@ if __name__ == '__main__':
         f.write(f'div_coef = {str(div_coef)}\n')
         f.write(f'bias_only = {str(bias_only)}\n')
         f.write(f'train_feature = {str(train_feature)}\n')
+        f.write(f'enhance = {str(enhance)}\n')
 
     
 

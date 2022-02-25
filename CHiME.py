@@ -19,7 +19,7 @@ def read_text(tpath, file):
 
 
 class CHiMEDataset(Dataset):
-    def __init__(self, split, bucket_size, path="/home/daniel094144/data/CHiME3", ascending=False):
+    def __init__(self, split, bucket_size, path="/home/daniel094144/data/CHiME3", enhance=False, ascending=False):
         # Setup
         self.path = path
         self.bucket_size = bucket_size
@@ -30,7 +30,10 @@ class CHiMEDataset(Dataset):
 
         file_list = []
         for s in split: 
-            split_list = list(Path(os.path.join(apath, s)).rglob("*.wav"))
+            if enhance: 
+                split_list = list(Path(os.path.join(os.path.join(apath, 'se_wav'), s)).rglob("*.wav"))
+            else:  
+                split_list = list(Path(os.path.join(apath, s)).rglob("*.wav"))
             file_list += split_list
         
         text = []

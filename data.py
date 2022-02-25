@@ -12,7 +12,7 @@ def collect_audio_batch(batch, extra_noise=0., half_batch_size_wav_len=300000):
     '''Collects a batch, should be list of tuples (audio_path <str>, list of int token <list>) 
        e.g. [(file1,txt1),(file2,txt2),...]
     '''
-    def audio_reader(filepath):
+    def audio_reader(filepath, se=False):
         wav, sample_rate = torchaudio.load(filepath)
         wav = wav.reshape(-1)
         wav += extra_noise * torch.randn_like(wav)
@@ -42,7 +42,7 @@ def collect_audio_batch(batch, extra_noise=0., half_batch_size_wav_len=300000):
     return audio_len, audio_feat, text, file
 
 
-def create_dataset(split, name, path, batch_size=12):
+def create_dataset(split, name, path, batch_size=12, enhance=False):
     ''' Interface for creating all kinds of dataset'''
 
     # Recognize corpus
@@ -59,15 +59,15 @@ def create_dataset(split, name, path, batch_size=12):
         raise NotImplementedError
 
     loader_bs = batch_size
-    dataset = Dataset(split, batch_size, path)
+    dataset = Dataset(split, batch_size, path, enhance)
     print(f'[INFO]    There are {len(dataset)} samples.')
 
     return dataset, loader_bs
 
 
-def load_dataset(split=None, name='librispeech', path=None, batch_size=12, extra_noise=0., num_workers=4):
+def load_dataset(split=None, name='librispeech', path=None, batch_size=12, extra_noise=0., enhance=False, num_workers=4):
     ''' Prepare dataloader for training/validation'''
-    dataset, loader_bs = create_dataset(split, name, path, batch_size)
+    dataset, loader_bs = create_dataset(split, name, path, batch_size, enhance)
     collate_fn = partial(collect_audio_batch, extra_noise=extra_noise)
 
     dataloader = DataLoader(dataset, batch_size=loader_bs, shuffle=False,
