@@ -70,7 +70,7 @@ def div_loss(x, non_blank=None, L_thd=64):
 
     return loss
 
-def collect_params(model):
+def collect_params(model, bias_only=False, train_feature=False):
     """Collect the affine scale + shift parameters from batch norms.
 
     Walk the model's modules and collect all batch normalization parameters.
@@ -80,15 +80,30 @@ def collect_params(model):
     """
     params = []
     names = []
+    trainable = []
+    if bias_only:
+        trainable = ['bias']
+    else: 
+        trainable = ['weight', 'bias']
+
+    
     for nm, m in model.named_modules():
+        
         if isinstance(m, nn.LayerNorm):
             for np, p in m.named_parameters():
-                if np in ['weight', 'bias']:  # weight is scale, bias is shift
+                if np in trainable:  
                     # if nm.split('.')[1] == 'feature_projection':
                     p.requires_grad = True
                     params.append(p)
                     names.append(f"{nm}.{np}")
-                
+        if train_feature:
+            if len(str(nm).split('.')) > 1:
+                if str(nm).split('.')[1] == 'feature_extractor' or str(nm).split('.')[1] == 'feature_projection':
+                    for np, p in m.named_parameters():
+                        p.requires_grad = True
+                        params.append(p)
+                        names.append(f"{nm}.{np}")
+
     return params, names
 
 
@@ -191,6 +206,8 @@ if __name__ == '__main__':
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--em_coef', type=float, default=1.)
     parser.add_argument('--reweight', action='store_true')
+    parser.add_argument('--bias_only', action='store_true')
+    parser.add_argument('--train_feature', action='store_true')
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--temp', type=float, default=2.5)
     parser.add_argument('--non_blank', action='store_true')
@@ -202,9 +219,6 @@ if __name__ == '__main__':
     # asr = "facebook/wav2vec2-large-960h-lv60-self"
     # asr = "facebook/wav2vec2-large-960h-lv60"
     # asr = "facebook/wav2vec2-large-robust-ft-swbd-300h"
-    # steps = 40
-    # episodic = True
-    # opt = 'Adam'
     # dataset_dir = '/home/daniel094144/data/LibriSpeech'
     # # dataset_dir = '/home/daniel094144/data/CHiME3'
     # dataset_name = 'librispeech'
@@ -212,16 +226,6 @@ if __name__ == '__main__':
     # split = ['test-other']
     # # split = ['et05_bus_real', 'et05_bus_simu', 'et05_caf_real', 'et05_caf_simu', 'et05_ped_simu', 'et05_str_real', 'et05_str_simu']
 
-    # lr = 1e-4
-    # em_coef = 1.
-    # reweight = False
-    # batch_size = 1
-    # temp =  2.5
-    # non_blank = False
-    # log_dir = './exps'
-    # extra_noise = 0.01
-    # # scheduler = torch.optim.lr_scheduler.StepLR
-    # scheduler = None
 
     args = parser.parse_args()
     asr = args.asr
@@ -241,8 +245,10 @@ if __name__ == '__main__':
     extra_noise = args.extra_noise
     scheduler = args.scheduler
     div_coef = args.div_coef
+    bias_only = args.bias_only
+    train_feature = args.train_feature
 
-    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)+'_noise_'+str(extra_noise)+'_rew_'+str(reweight)+'_div_'+str(div_coef)
+    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)+'_noise_'+str(extra_noise)+'_rew_'+str(reweight)+'_div_'+str(div_coef)+'_bias_'+str(bias_only)+'_feat_'+str(train_feature)
 
     from data import load_dataset
     dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise)
@@ -266,6 +272,8 @@ if __name__ == '__main__':
     print(f'extra_noise = {extra_noise}')
     print(f'scheduler = {str(scheduler)}')
     print(f'div_coef = {str(div_coef)}')
+    print(f'bias_only = {bias_only}')
+    print(f'train_feature = {train_feature}')
 
     # load model and tokenizer
     processor = Wav2Vec2Processor.from_pretrained(asr, sampling_rate=SAMPLE_RATE, return_attention_mask=True)
@@ -273,14 +281,14 @@ if __name__ == '__main__':
     
     # set up for tent
     model = configure_model(model)
-    params, param_names = collect_params(model)
+    params, param_names = collect_params(model, bias_only, train_feature)
     optimizer, scheduler = setup_optimizer(params, opt, lr, scheduler=scheduler)
 
     if episodic: 
         model_state, optimizer_state, scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
     
-    # print(param_names)
+    print(param_names)
     
     for batch in dataset:
         lens, wavs, texts, files = batch
@@ -352,7 +360,9 @@ if __name__ == '__main__':
         f.write(f'non_blank = {str(non_blank)}\n')
         f.write(f'extra_noise = {extra_noise}\n')
         f.write(f'scheduler = {str(scheduler)}\n')
-        f.wrtie(f'div_coef = {str(div_coef)}\n')
+        f.write(f'div_coef = {str(div_coef)}\n')
+        f.write(f'bias_only = {str(bias_only)}\n')
+        f.write(f'train_feature = {str(train_feature)}\n')
 
     
 

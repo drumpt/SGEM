@@ -19,15 +19,15 @@ def read_text(tpath, file):
             
 
 
-class SwbdDataset(Dataset):
-    def __init__(self, split, bucket_size, path="/home/daniel094144/data/Switchboard", ascending=False):
+class TedDataset(Dataset):
+    def __init__(self, split, bucket_size, path="/home/daniel094144/data/TEDLIUM_release2/test", ascending=True):
         # Setup
         self.path = path
         self.bucket_size = bucket_size
         
         split = ['']
-        apath = path + "/eval2000_wav_segment"
-        tpath = path + "/eval2000_transcription"
+        apath = path + "/wav_segment"
+        tpath = path + "/transcription"
 
         file_list = []
         for s in split: 
@@ -38,7 +38,7 @@ class SwbdDataset(Dataset):
         filtered_file_list = []
         for f in tqdm(file_list, desc='Read text'):
             transcription = read_text(tpath, str(f))
-            print(transcription)
+            # print(transcription)
             if transcription == None: 
                 pass
             # elif len(transcription.split()) <= 3:
