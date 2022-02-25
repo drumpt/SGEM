@@ -14,7 +14,7 @@ SAMPLE_RATE = 16000
 # preprocess text 
 def preprocess_text(text):
     text = text.replace("(%HESITATION)", "")
-    text = text.replace("-", "")
+    text = text.replace("-", " ")
     text = re.sub("[^ A-Z']", "", text)
     text = ' '.join(text.split())
     

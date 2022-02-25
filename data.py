@@ -52,6 +52,8 @@ def create_dataset(split, name, path, batch_size=12):
         from CHiME import CHiMEDataset as Dataset
     elif name.lower() == "swbd":
         from switchboard import SwbdDataset as Dataset
+    elif name.lower() == "ted":
+        from ted import TedDataset as Dataset
         
     else:
         raise NotImplementedError

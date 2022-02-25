@@ -8,7 +8,10 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --episodic \
                 --em_coef 0.7 \
                 --reweight \
+                --log_dir feat_exps \
+                --lr 2e-5 \
                 --non_blank \
+                --train_feature \
                 --extra_noise 0.01 \
 
 python main.py --asr facebook/wav2vec2-base-960h \
@@ -19,7 +22,10 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --episodic \
                 --em_coef 0.7 \
                 --reweight \
+                --lr 2e-5 \
                 --non_blank \
+                --log_dir feat_exps \
+                --train_feature \
                 --extra_noise 0.01 \
                 
 
@@ -31,7 +37,10 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --episodic \
                 --em_coef 0.7 \
                 --reweight \
+                --lr 2e-5 \
                 --non_blank \
+                --train_feature \
+                --log_dir feat_exps \
                 --extra_noise 0.005 \
 
 python main.py --asr facebook/wav2vec2-base-960h \
@@ -42,5 +51,8 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --episodic \
                 --em_coef 0.7 \
                 --reweight \
+                --lr 2e-5 \
                 --non_blank \
+                --log_dir feat_exps \
+                --train_feature \
                 --extra_noise 0.005 \
