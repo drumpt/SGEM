@@ -14,7 +14,7 @@ import torch.optim as optim
 from jiwer import wer
 
 
-def setup_optimizer(params, opt_name='Adam', lr=1e-4, beta=0.9, weight_decay=0., scheduler=None, step_size=10, gamma=0.5):
+def setup_optimizer(params, opt_name='Adam', lr=1e-4, beta=0.9, weight_decay=0., scheduler=None, step_size=1, gamma=0.85):
     opt = getattr(torch.optim, opt_name)
     print(f'[INFO]    optimizer: {opt}')
     print(f'[INFO]    scheduler: {scheduler}')
@@ -27,7 +27,7 @@ def setup_optimizer(params, opt_name='Adam', lr=1e-4, beta=0.9, weight_decay=0.,
         optimizer = opt(params, lr=lr, weight_decay=weight_decay)
     
     if scheduler is not None: 
-        return optimizer, scheduler(optimizer, step_size=step_size, gamma=gamma)
+        return optimizer, eval(scheduler)(optimizer, step_size=step_size, gamma=gamma)
     else: 
         return optimizer, None
 
@@ -64,8 +64,6 @@ def div_loss(x, non_blank=None, L_thd=64):
     else:
         cls_pred = x.mean(0) # (D, )
 
-    # if L < 64:     
-    # loss = -softmax_entropy(cls_pred, 0) / (L / L_thd)
     loss = -softmax_entropy(cls_pred, 0)
 
     return loss
@@ -92,7 +90,6 @@ def collect_params(model, bias_only=False, train_feature=False):
         if isinstance(m, nn.LayerNorm):
             for np, p in m.named_parameters():
                 if np in trainable:  
-                    # if nm.split('.')[1] == 'feature_projection':
                     p.requires_grad = True
                     params.append(p)
                     names.append(f"{nm}.{np}")
@@ -143,7 +140,7 @@ def configure_model(model):
     model.requires_grad_(False)
     return model
 
-def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1., not_blank=True, scheduler=None, div_coef=0, repeat_inference=False):
+def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1., not_blank=True, scheduler=None, div_coef=0, repeat_inference=True):
     """Forward and adapt model on batch of data.
 
     Measure entropy of the model prediction, take gradients, and update params.
@@ -180,7 +177,7 @@ def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1.,
     # print(grad)
     optimizer.step()
     if scheduler is not None: 
-         scheduler.step()
+        scheduler.step()
     # optimizer.zero_grad()
     model.zero_grad()
 
@@ -255,6 +252,9 @@ if __name__ == '__main__':
 
     from data import load_dataset
     dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise, enhance)
+    transcriptions_1 = []
+    transcriptions_3 = []
+    transcriptions_5 = []
     transcriptions_10 = []
     transcriptions_20 = []
     transcriptions_40 = []
@@ -304,17 +304,41 @@ if __name__ == '__main__':
             model, optimizer, scheduler = load_model_and_optimizer(model, optimizer, model_state, optimizer_state, scheduler_state)
         
         # iteration 
+        
+        # vanilla forward 
+        with torch.no_grad():
+            outputs = model(input_values).logits
+        predicted_ids = torch.argmax(outputs, dim=-1)
+        ori_transcription = processor.batch_decode(predicted_ids)
+        ori_transcriptions += ori_transcription
+        ori_wer = wer(list(texts), list(ori_transcription))
+        print("original WER: ", ori_wer)
+
+        # SUTA
         for i in range(steps): 
             outputs = forward_and_adapt(input_values, model, optimizer, em_coef, reweight, temp, non_blank, scheduler, div_coef)
             if episodic: 
                 if i == 0: 
-                    ori = outputs
-                    predicted_ids = torch.argmax(ori, dim=-1)
-                    ori_transcription = processor.batch_decode(predicted_ids)
-                    ori_transcriptions += ori_transcription
-                    ori_wer = wer(list(texts), list(ori_transcription))
-                    print("original WER: ", ori_wer)
-                    
+                    predicted_ids = torch.argmax(outputs, dim=-1)
+                    transcription = processor.batch_decode(predicted_ids)
+                    ada_wer = wer(list(texts), list(transcription))
+                    print("adapt-1 WER:  ", ada_wer)
+                    transcriptions_3 += transcription
+
+                if i == 2: 
+                    predicted_ids = torch.argmax(outputs, dim=-1)
+                    transcription = processor.batch_decode(predicted_ids)
+                    ada_wer = wer(list(texts), list(transcription))
+                    print("adapt-3 WER:  ", ada_wer)
+                    transcriptions_3 += transcription
+
+                if i == 4: 
+                    predicted_ids = torch.argmax(outputs, dim=-1)
+                    transcription = processor.batch_decode(predicted_ids)
+                    ada_wer = wer(list(texts), list(transcription))
+                    print("adapt-5 WER:  ", ada_wer)
+                    transcriptions_5 += transcription
+
                 if i == 9: 
                     predicted_ids = torch.argmax(outputs, dim=-1)
                     transcription = processor.batch_decode(predicted_ids)
@@ -334,8 +358,6 @@ if __name__ == '__main__':
                     transcription = processor.batch_decode(predicted_ids)
                     ada_wer = wer(list(texts), list(transcription))
                     print("adapt-40 WER: ", ada_wer)
-                    # print(transcription)
-                    # print(texts)
                     transcriptions_40 += transcription
 
         gt_texts += texts
@@ -343,7 +365,10 @@ if __name__ == '__main__':
 
     print("asr:", asr)
     print("original WER:", wer(gt_texts, ori_transcriptions))
-    if steps > 10: 
+    if steps >= 3: 
+        print("TTA-1 WER:", wer(gt_texts, transcriptions_1))
+        print("TTA-3 WER:", wer(gt_texts, transcriptions_3))
+        print("TTA-5 WER:", wer(gt_texts, transcriptions_5))
         print("TTA-10 WER:", wer(gt_texts, transcriptions_10))
         print("TTA-20 WER:", wer(gt_texts, transcriptions_20))
         print("TTA-40 WER:", wer(gt_texts, transcriptions_40))
@@ -351,7 +376,10 @@ if __name__ == '__main__':
 
     with open(os.path.join(log_dir, exp_name), 'w') as f: 
         f.write(f"original WER: {wer(gt_texts, ori_transcriptions)}\n")
-        if steps > 10: 
+        if steps >= 1: 
+            f.write(f"TTA-1 WER: {wer(gt_texts, transcriptions_1)}\n")
+            f.write(f"TTA-3 WER: {wer(gt_texts, transcriptions_3)}\n")
+            f.write(f"TTA-5 WER: {wer(gt_texts, transcriptions_5)}\n")
             f.write(f"TTA-10 WER: {wer(gt_texts, transcriptions_10)}\n")
             f.write(f"TTA-20 WER: {wer(gt_texts, transcriptions_20)}\n")
             f.write(f"TTA-40 WER: {wer(gt_texts, transcriptions_40)}\n")
