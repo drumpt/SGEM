@@ -12,10 +12,9 @@ from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 from torch import nn
 import torch.optim as optim
 from jiwer import wer
-import pytorch_warmup as warmup
 
 
-def setup_optimizer(params, opt_name='AdamW', lr=1e-4, beta=0.9, weight_decay=0., scheduler=None, step_size=1, gamma=0.7):
+def setup_optimizer(params, opt_name='Adam', lr=1e-4, beta=0.9, weight_decay=0., scheduler=None, step_size=1, gamma=0.85):
     opt = getattr(torch.optim, opt_name)
     print(f'[INFO]    optimizer: {opt}')
     print(f'[INFO]    scheduler: {scheduler}')
@@ -69,7 +68,7 @@ def div_loss(x, non_blank=None, L_thd=64):
 
     return loss
 
-def collect_params(model, bias_only=False, train_feature=False, train_all=False):
+def collect_params(model, bias_only=False, train_feature=False):
     """Collect the affine scale + shift parameters from batch norms.
 
     Walk the model's modules and collect all batch normalization parameters.
@@ -87,7 +86,7 @@ def collect_params(model, bias_only=False, train_feature=False, train_all=False)
 
     
     for nm, m in model.named_modules():
-        print(nm)
+        
         if isinstance(m, nn.LayerNorm):
             for np, p in m.named_parameters():
                 if np in trainable:  
@@ -101,46 +100,8 @@ def collect_params(model, bias_only=False, train_feature=False, train_all=False)
                         p.requires_grad = True
                         params.append(p)
                         names.append(f"{nm}.{np}")
-                        
-        if train_all: 
-            for np, p in m.named_parameters():
-                p.requires_grad = True
-                params.append(p)
-                names.append(f"{nm}.{np}")
 
     return params, names
-
-
-import torch.nn.functional as F
-# dropout
-def consist_loss(model, input_values, outputs):
-    targets = outputs
-    # noisy outputs
-    model.wav2vec2.encoder.dropout.train()
-    noisy_outputs = model(input_values).logits
-
-    # loss = F.mse_loss(noisy_outputs, targets, reduction='mean')
-
-    import json
-    f = open('vocab.json')
-    vocab = json.load(f)
-
-
-    ctc_loss = nn.CTCLoss(blank=0, zero_infinity=False)
-    predicted_ids = torch.argmax(outputs, dim=-1)
-    transcription = processor.batch_decode(predicted_ids)[0]
-    target = []
-    for s in transcription:
-        if s == ' ':
-            s = '|'
-        target.append(vocab[s])
-
-    logp = noisy_outputs.log_softmax(1).transpose(1, 0) # L,N,D
-    input_len = logp.shape[0]
-    tgt_len = len(target)
-    loss = ctc_loss(logp, torch.tensor(target).int(), torch.tensor([input_len]), torch.tensor([tgt_len]))
-    model.eval()
-    return loss
 
 
 from copy import deepcopy
@@ -179,8 +140,8 @@ def configure_model(model):
     model.requires_grad_(False)
     return model
 
-def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1., not_blank=True, scheduler=None, 
-                        div_coef=0, repeat_inference=True, skip_short_thd=None):
+def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1., not_blank=True, scheduler=None, div_coef=0, repeat_inference=True, 
+                        pl_coef=1, vocab=None, processor=None):
     """Forward and adapt model on batch of data.
 
     Measure entropy of the model prediction, take gradients, and update params.
@@ -189,7 +150,6 @@ def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1.,
     """
     # forward
     outputs = model(x).logits
-    
     predicted_ids = torch.argmax(outputs, dim=-1)
     non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
     # adapt
@@ -211,10 +171,9 @@ def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1.,
     if div_coef > 0: 
         d_loss = div_loss(outputs, not_blank) 
         loss += d_loss * div_coef 
-    # print(f'e_loss = {e_loss}; c_loss = {c_loss}; d_loss = {d_loss}') 
-    # con_coef = 0.5
-    # print(consist_loss(model, x, outputs))
-    # loss = loss * (1-con_coef) + consist_loss(model, x, outputs) * con_coef
+    # print(f'e_loss = {e_loss}; c_loss = {c_loss}; d_loss = {d_loss}')
+     
+    loss = loss * (1-pl_coef) + pseudo_labeling_loss(outputs, vocab, processor) * pl_coef
 
     loss.backward()
     # grad = cal_grad(model)
@@ -231,16 +190,34 @@ def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1.,
             outputs = model(x).logits
     return outputs
 
+
+def pseudo_labeling_loss(outputs, vocab, processor):
+    ctc_loss = nn.CTCLoss(blank=0, zero_infinity=False)
+    predicted_ids = torch.argmax(outputs, dim=-1)
+    transcription = processor.batch_decode(predicted_ids)[0]
+    target = []
+    for s in transcription:
+        if s == ' ':
+            s = '|'
+        target.append(vocab[s])
+
+    logp = outputs.log_softmax(1).transpose(1, 0) # L,N,D
+    input_len = logp.shape[0]
+    tgt_len = len(target)
+    loss = ctc_loss(logp, torch.tensor(target).int(), torch.tensor([input_len]), torch.tensor([tgt_len]))
+    
+    return loss
+
 import argparse
 
 if __name__ == '__main__':
     SAMPLE_RATE = 16000
     parser = argparse.ArgumentParser(description="TTA ASR")
     parser.add_argument('--asr', type=str, default="facebook/wav2vec2-base-960h")
-    parser.add_argument('--steps', type=int, default=40)
+    parser.add_argument('--steps', type=int, default=10)
     parser.add_argument('--episodic', action='store_true')
     parser.add_argument('--div_coef', type=float, default=0.)
-    parser.add_argument('--opt', type=str, default='AdamW')
+    parser.add_argument('--opt', type=str, default='Adam')
     parser.add_argument('--dataset_name', type=str, default='librispeech')
     parser.add_argument('--dataset_dir', type=str, default='/home/daniel094144/data/LibriSpeech')
     parser.add_argument('--split', default=['test-other'])
@@ -256,12 +233,20 @@ if __name__ == '__main__':
     parser.add_argument('--log_dir', type=str, default='./exps')
     parser.add_argument('--extra_noise', type=float, default=0.)
     parser.add_argument('--scheduler', default=None)
+    parser.add_argument('--pl_coef', type=float, default=1)
     
     
     # asr = "facebook/wav2vec2-base-960h"
     # asr = "facebook/wav2vec2-large-960h-lv60-self"
     # asr = "facebook/wav2vec2-large-960h-lv60"
     # asr = "facebook/wav2vec2-large-robust-ft-swbd-300h"
+    # dataset_dir = '/home/daniel094144/data/LibriSpeech'
+    # # dataset_dir = '/home/daniel094144/data/CHiME3'
+    # dataset_name = 'librispeech'
+    # # dataset_name = 'chime'
+    # split = ['test-other']
+    # # split = ['et05_bus_real', 'et05_bus_simu', 'et05_caf_real', 'et05_caf_simu', 'et05_ped_simu', 'et05_str_real', 'et05_str_simu']
+
 
     args = parser.parse_args()
     asr = args.asr
@@ -284,9 +269,13 @@ if __name__ == '__main__':
     bias_only = args.bias_only
     train_feature = args.train_feature
     enhance = args.enhance
-    skip_short_thd = None
+    pl_coef = args.pl_coef
 
-    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)+'_noise_'+str(extra_noise)+'_rew_'+str(reweight)+'_div_'+str(div_coef)+'_bias_'+str(bias_only)+'_feat_'+str(train_feature)+'_se_'+str(enhance)
+    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)+'_noise_'+str(extra_noise)+'_rew_'+str(reweight)+'_div_'+str(div_coef)+'_bias_'+str(bias_only)+'_feat_'+str(train_feature)+'_se_'+str(enhance)+'_pl_'+str(pl_coef)
+    import json
+    f = open('vocab.json')
+    vocab = json.load(f)
+    print(vocab)
 
     from data import load_dataset
     dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise, enhance)
@@ -316,10 +305,12 @@ if __name__ == '__main__':
     print(f'bias_only = {bias_only}')
     print(f'train_feature = {train_feature}')
     print(f'enhance = {str(enhance)}')
+    print(f'pl_coef = {pl_coef}')
 
     # load model and tokenizer
     processor = Wav2Vec2Processor.from_pretrained(asr, sampling_rate=SAMPLE_RATE, return_attention_mask=True)
     model = Wav2Vec2ForCTC.from_pretrained(asr).eval().cuda()        
+    import json
     
     # set up for tent
     model = configure_model(model)
@@ -331,10 +322,7 @@ if __name__ == '__main__':
 
     
     print(param_names)
-    count = 0
-
-    import time
-    start = time.time()
+    
     for batch in dataset:
         lens, wavs, texts, files = batch
         
@@ -343,6 +331,8 @@ if __name__ == '__main__':
         
         if episodic: 
             model, optimizer, scheduler = load_model_and_optimizer(model, optimizer, model_state, optimizer_state, scheduler_state)
+        
+        # iteration 
         
         # vanilla forward 
         with torch.no_grad():
@@ -353,23 +343,16 @@ if __name__ == '__main__':
         ori_wer = wer(list(texts), list(ori_transcription))
         print("original WER: ", ori_wer)
 
-        
-        if skip_short_thd is not None: 
-            if outputs.shape[1] <= skip_short_thd:
-                print(f'do not adapt since length is {outputs.shape[1]}')
-                count += 1
-                continue
-        
         # SUTA
         for i in range(steps): 
-            outputs = forward_and_adapt(input_values, model, optimizer, em_coef, reweight, temp, non_blank, scheduler, div_coef)
+            outputs = forward_and_adapt(input_values, model, optimizer, em_coef, reweight, temp, non_blank, scheduler, 
+                            div_coef=0, repeat_inference=True, pl_coef=1., vocab=vocab, processor=processor)
             if episodic: 
                 if i == 0: 
                     predicted_ids = torch.argmax(outputs, dim=-1)
                     transcription = processor.batch_decode(predicted_ids)
                     ada_wer = wer(list(texts), list(transcription))
                     print("adapt-1 WER:  ", ada_wer)
-                    # print(texts, transcription)
                     transcriptions_1 += transcription
 
                 if i == 2: 
@@ -377,7 +360,6 @@ if __name__ == '__main__':
                     transcription = processor.batch_decode(predicted_ids)
                     ada_wer = wer(list(texts), list(transcription))
                     print("adapt-3 WER:  ", ada_wer)
-                    # print(texts, transcription)
                     transcriptions_3 += transcription
 
                 if i == 4: 
@@ -385,7 +367,6 @@ if __name__ == '__main__':
                     transcription = processor.batch_decode(predicted_ids)
                     ada_wer = wer(list(texts), list(transcription))
                     print("adapt-5 WER:  ", ada_wer)
-                    # print(texts, transcription)
                     transcriptions_5 += transcription
 
                 if i == 9: 
@@ -393,7 +374,6 @@ if __name__ == '__main__':
                     transcription = processor.batch_decode(predicted_ids)
                     ada_wer = wer(list(texts), list(transcription))
                     print("adapt-10 WER: ", ada_wer)
-                    # print(texts, transcription)
                     transcriptions_10 += transcription
                     
                 if i == 19: 
@@ -401,7 +381,6 @@ if __name__ == '__main__':
                     transcription = processor.batch_decode(predicted_ids)
                     ada_wer = wer(list(texts), list(transcription))
                     print("adapt-20 WER: ", ada_wer)
-                    # print(texts, transcription)
                     transcriptions_20 += transcription
 
                 if  i == 39: 
@@ -409,17 +388,12 @@ if __name__ == '__main__':
                     transcription = processor.batch_decode(predicted_ids)
                     ada_wer = wer(list(texts), list(transcription))
                     print("adapt-40 WER: ", ada_wer)
-                    # print(texts, transcription)
                     transcriptions_40 += transcription
-        
-        del input_values
-        torch.cuda.empty_cache()
+
         gt_texts += texts
 
 
     print("asr:", asr)
-    print(f'non-adapted count = {count}')
-    print(f'dataset num = {len(dataset)}')
     print("original WER:", wer(gt_texts, ori_transcriptions))
     if steps >= 10: 
         print("TTA-1 WER:", wer(gt_texts, transcriptions_1))
@@ -431,10 +405,6 @@ if __name__ == '__main__':
     if steps >= 40:
         print("TTA-40 WER:", wer(gt_texts, transcriptions_40))
     print('------------------------------------')
-
-
-    if not os.path.exists(log_dir):
-        os.mkdir(log_dir)
 
     with open(os.path.join(log_dir, exp_name), 'w') as f: 
         f.write(f"original WER: {wer(gt_texts, ori_transcriptions)}\n")
@@ -462,6 +432,7 @@ if __name__ == '__main__':
         f.write(f'bias_only = {str(bias_only)}\n')
         f.write(f'train_feature = {str(train_feature)}\n')
         f.write(f'enhance = {str(enhance)}\n')
+        f.write(f'pl_coef = {pl_coef}\n')
 
     
 

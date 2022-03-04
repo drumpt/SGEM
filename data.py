@@ -8,29 +8,34 @@ from torch.nn.utils.rnn import pad_sequence
 
 SAMPLE_RATE = 16000
 
-def collect_audio_batch(batch, extra_noise=0., half_batch_size_wav_len=300000):
+def collect_audio_batch(batch, extra_noise=0., maxLen=300000):
     '''Collects a batch, should be list of tuples (audio_path <str>, list of int token <list>) 
        e.g. [(file1,txt1),(file2,txt2),...]
     '''
     def audio_reader(filepath, se=False):
+        
         wav, sample_rate = torchaudio.load(filepath)
+        if sample_rate != SAMPLE_RATE:
+            wav = torchaudio.transforms.Resample(sample_rate, SAMPLE_RATE)(wav)
         wav = wav.reshape(-1)
+        if wav.shape[-1] >= maxLen:
+            print(f'{filepath} has len {wav.shape}, truncate to {maxLen}')
+            wav = wav[:maxLen]
+            print(wav.shape)
         wav += extra_noise * torch.randn_like(wav)
+        
         return wav
 
     # Bucketed batch should be [[(file1,txt1),(file2,txt2),...]]
     if type(batch[0]) is not tuple:
         batch = batch[0]
 
-    # Make sure that batch size is reasonable
-    first_len = audio_reader(str(batch[0][0])).size(0)
-
     # Read batch
     file, audio_feat, audio_len, text = [], [], [], []
     with torch.no_grad():
         for b in batch:
-            file.append(str(b[0]).split('/')[-1].split('.')[0])
             feat = audio_reader(str(b[0])).numpy()
+            file.append(str(b[0]).split('/')[-1].split('.')[0])
             audio_feat.append(feat)
             audio_len.append(len(feat))
             text.append(b[1])
@@ -54,6 +59,8 @@ def create_dataset(split, name, path, batch_size=12, enhance=False):
         from switchboard import SwbdDataset as Dataset
     elif name.lower() == "ted":
         from ted import TedDataset as Dataset
+    elif name.lower() == "commonvoice":
+        from commonvoice import CVDataset as Dataset
         
     else:
         raise NotImplementedError
