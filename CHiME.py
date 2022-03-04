@@ -30,16 +30,19 @@ class CHiMEDataset(Dataset):
 
         file_list = []
         for s in split: 
-            if enhance: 
-                split_list = list(Path(os.path.join(os.path.join(apath, 'se_wav'), s)).glob("*.wav"))
-            else:  
-                split_list = list(Path(os.path.join(apath, s)).glob("*.wav"))
+            split_list = list(Path(os.path.join(apath, s)).glob("*.wav"))
             file_list += split_list
         
         text = []
         for f in tqdm(file_list, desc='Read text'):
             transcription = read_text(tpath, str(f))
             text.append(transcription)
+
+        if enhance: 
+            file_list = []
+            for s in split: 
+                split_list = list(Path(os.path.join(os.path.join(apath, s), 'se_wav')).glob("*.wav"))
+                file_list += split_list
 
         self.file_list, self.text = zip(*[(f_name, txt)
                                           for f_name, txt in sorted(zip(file_list, text), reverse=not ascending, key=lambda x:len(x[1]))])

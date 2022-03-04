@@ -211,10 +211,6 @@ def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1.,
     if div_coef > 0: 
         d_loss = div_loss(outputs, not_blank) 
         loss += d_loss * div_coef 
-    # print(f'e_loss = {e_loss}; c_loss = {c_loss}; d_loss = {d_loss}') 
-    # con_coef = 0.5
-    # print(consist_loss(model, x, outputs))
-    # loss = loss * (1-con_coef) + consist_loss(model, x, outputs) * con_coef
 
     loss.backward()
     # grad = cal_grad(model)
@@ -237,7 +233,7 @@ if __name__ == '__main__':
     SAMPLE_RATE = 16000
     parser = argparse.ArgumentParser(description="TTA ASR")
     parser.add_argument('--asr', type=str, default="facebook/wav2vec2-base-960h")
-    parser.add_argument('--steps', type=int, default=40)
+    parser.add_argument('--steps', type=int, default=10)
     parser.add_argument('--episodic', action='store_true')
     parser.add_argument('--div_coef', type=float, default=0.)
     parser.add_argument('--opt', type=str, default='AdamW')
@@ -290,12 +286,7 @@ if __name__ == '__main__':
 
     from data import load_dataset
     dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise, enhance)
-    transcriptions_1 = []
-    transcriptions_3 = []
-    transcriptions_5 = []
-    transcriptions_10 = []
-    transcriptions_20 = []
-    transcriptions_40 = []
+    transcriptions = []
     gt_texts = []
     ori_transcriptions = []
     
@@ -334,102 +325,62 @@ if __name__ == '__main__':
     count = 0
 
     import time
-    start = time.time()
+    overall_per_sec = 0
+    
     for batch in dataset:
         lens, wavs, texts, files = batch
         
         inputs = processor(wavs, return_tensors="pt", padding="longest")
+        audio_len = inputs.input_values.shape[1] / 16000
+        print(inputs.input_values.shape[1] / 16000)
         input_values = inputs.input_values.cuda()
         
         if episodic: 
             model, optimizer, scheduler = load_model_and_optimizer(model, optimizer, model_state, optimizer_state, scheduler_state)
         
         # vanilla forward 
-        with torch.no_grad():
-            outputs = model(input_values).logits
-        predicted_ids = torch.argmax(outputs, dim=-1)
-        ori_transcription = processor.batch_decode(predicted_ids)
-        ori_transcriptions += ori_transcription
-        ori_wer = wer(list(texts), list(ori_transcription))
-        print("original WER: ", ori_wer)
+        # with torch.no_grad():
+        #     outputs = model(input_values).logits
+        # predicted_ids = torch.argmax(outputs, dim=-1)
+        # ori_transcription = processor.batch_decode(predicted_ids)
+        # ori_transcriptions += ori_transcription
+        # ori_wer = wer(list(texts), list(ori_transcription))
+        # print("original WER: ", ori_wer)
 
         
-        if skip_short_thd is not None: 
-            if outputs.shape[1] <= skip_short_thd:
-                print(f'do not adapt since length is {outputs.shape[1]}')
-                count += 1
-                continue
+        # if skip_short_thd is not None: 
+        #     if outputs.shape[1] <= skip_short_thd:
+        #         print(f'do not adapt since length is {outputs.shape[1]}')
+        #         count += 1
+        #         continue
         
         # SUTA
+        start = time.time()
         for i in range(steps): 
             outputs = forward_and_adapt(input_values, model, optimizer, em_coef, reweight, temp, non_blank, scheduler, div_coef)
             if episodic: 
-                if i == 0: 
+                if i == steps - 1: 
                     predicted_ids = torch.argmax(outputs, dim=-1)
                     transcription = processor.batch_decode(predicted_ids)
-                    ada_wer = wer(list(texts), list(transcription))
-                    print("adapt-1 WER:  ", ada_wer)
-                    # print(texts, transcription)
-                    transcriptions_1 += transcription
-
-                if i == 2: 
-                    predicted_ids = torch.argmax(outputs, dim=-1)
-                    transcription = processor.batch_decode(predicted_ids)
-                    ada_wer = wer(list(texts), list(transcription))
-                    print("adapt-3 WER:  ", ada_wer)
-                    # print(texts, transcription)
-                    transcriptions_3 += transcription
-
-                if i == 4: 
-                    predicted_ids = torch.argmax(outputs, dim=-1)
-                    transcription = processor.batch_decode(predicted_ids)
-                    ada_wer = wer(list(texts), list(transcription))
-                    print("adapt-5 WER:  ", ada_wer)
-                    # print(texts, transcription)
-                    transcriptions_5 += transcription
-
-                if i == 9: 
-                    predicted_ids = torch.argmax(outputs, dim=-1)
-                    transcription = processor.batch_decode(predicted_ids)
-                    ada_wer = wer(list(texts), list(transcription))
-                    print("adapt-10 WER: ", ada_wer)
-                    # print(texts, transcription)
-                    transcriptions_10 += transcription
-                    
-                if i == 19: 
-                    predicted_ids = torch.argmax(outputs, dim=-1)
-                    transcription = processor.batch_decode(predicted_ids)
-                    ada_wer = wer(list(texts), list(transcription))
-                    print("adapt-20 WER: ", ada_wer)
-                    # print(texts, transcription)
-                    transcriptions_20 += transcription
-
-                if  i == 39: 
-                    predicted_ids = torch.argmax(outputs, dim=-1)
-                    transcription = processor.batch_decode(predicted_ids)
-                    ada_wer = wer(list(texts), list(transcription))
-                    print("adapt-40 WER: ", ada_wer)
-                    # print(texts, transcription)
-                    transcriptions_40 += transcription
+                    transcriptions += transcription
         
-        del input_values
-        torch.cuda.empty_cache()
+        end = time.time()
+        duration = end - start
+        print(duration / audio_len)
+        overall_per_sec += duration / audio_len
+        
         gt_texts += texts
+
+    
+    
 
 
     print("asr:", asr)
+    print('ave for 1s: ', overall_per_sec / len(dataset))
     print(f'non-adapted count = {count}')
     print(f'dataset num = {len(dataset)}')
-    print("original WER:", wer(gt_texts, ori_transcriptions))
-    if steps >= 10: 
-        print("TTA-1 WER:", wer(gt_texts, transcriptions_1))
-        print("TTA-3 WER:", wer(gt_texts, transcriptions_3))
-        print("TTA-5 WER:", wer(gt_texts, transcriptions_5))
-        print("TTA-10 WER:", wer(gt_texts, transcriptions_10))
-    if steps >= 20: 
-        print("TTA-20 WER:", wer(gt_texts, transcriptions_20))
-    if steps >= 40:
-        print("TTA-40 WER:", wer(gt_texts, transcriptions_40))
+    # print("original WER:", wer(gt_texts, ori_transcriptions))
+    print(f"TTA-{steps} WER:", wer(gt_texts, transcriptions))
     print('------------------------------------')
 
 
@@ -437,16 +388,8 @@ if __name__ == '__main__':
         os.mkdir(log_dir)
 
     with open(os.path.join(log_dir, exp_name), 'w') as f: 
-        f.write(f"original WER: {wer(gt_texts, ori_transcriptions)}\n")
-        if steps >= 10: 
-            f.write(f"TTA-1 WER: {wer(gt_texts, transcriptions_1)}\n")
-            f.write(f"TTA-3 WER: {wer(gt_texts, transcriptions_3)}\n")
-            f.write(f"TTA-5 WER: {wer(gt_texts, transcriptions_5)}\n")
-            f.write(f"TTA-10 WER: {wer(gt_texts, transcriptions_10)}\n")
-        if steps >= 20:
-            f.write(f"TTA-20 WER: {wer(gt_texts, transcriptions_20)}\n")
-        if steps >= 40:
-            f.write(f"TTA-40 WER: {wer(gt_texts, transcriptions_40)}\n")
+        # f.write(f"original WER: {wer(gt_texts, ori_transcriptions)}\n")
+        f.write(f'ave for 1s: {overall_per_sec / len(dataset)}\n')
         f.write(f'eposidic? {episodic}\n')
         f.write(f'lr = {lr}\n')
         f.write(f'optim = {opt}\n')
