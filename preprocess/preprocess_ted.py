@@ -1,7 +1,5 @@
 import soundfile as sf
-import librosa
 import os
-import numpy as np
 import re 
 
 stm_path = '/home/daniel094144/data/TEDLIUM_release2/test/stm'
