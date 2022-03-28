@@ -8,7 +8,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 SAMPLE_RATE = 16000
 
-def collect_audio_batch(batch, extra_noise=0., maxLen=300000):
+def collect_audio_batch(batch, extra_noise=0., maxLen=600000):
     '''Collects a batch, should be list of tuples (audio_path <str>, list of int token <list>) 
        e.g. [(file1,txt1),(file2,txt2),...]
     '''

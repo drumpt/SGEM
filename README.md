@@ -1,11 +1,11 @@
 # Listen, Adapt, Better WER: Source-free Single-utterance Test-timeAdaptation for Automatic Speech Recognition [On-going project]
 ### Introduction
-Given a CTC-based trained ASR model with layer normalization layer, we can adapt our model to one utterance by unsupervised objectives (such as entropy minimization, class correlation minimization). 
+Given a CTC-based trained ASR model, we can adapt our source ASR model for one utterance by unsupervised objectives (such as entropy minimization, minimum class confusion). 
 
 Our proposed method, **Single-Utterance Test-time Adaptation (SUTA)**, has below advantages:
 * Efficient adaptation for one single utterance
 * DONT need source data
-* Only need about 0.1s per 1s utterance for 10 steps adaptation
+* Only need about 0.1s per 1s utterance for 10-steps adaptation
 
 ### Installation 
 ```Coming soon```
