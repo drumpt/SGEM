@@ -225,7 +225,6 @@ if __name__ == '__main__':
     parser.add_argument('--em_coef', type=float, default=1.)
     parser.add_argument('--reweight', action='store_true')
     parser.add_argument('--bias_only', action='store_true')
-    parser.add_argument('--enhance', action='store_true')
     parser.add_argument('--train_feature', action='store_true')
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--temp', type=float, default=2.5)
@@ -268,17 +267,16 @@ if __name__ == '__main__':
     div_coef = args.div_coef
     bias_only = args.bias_only
     train_feature = args.train_feature
-    enhance = args.enhance
     pl_coef = args.pl_coef
 
-    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)+'_noise_'+str(extra_noise)+'_rew_'+str(reweight)+'_div_'+str(div_coef)+'_bias_'+str(bias_only)+'_feat_'+str(train_feature)+'_se_'+str(enhance)+'_pl_'+str(pl_coef)
+    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)+'_noise_'+str(extra_noise)+'_rew_'+str(reweight)+'_div_'+str(div_coef)+'_bias_'+str(bias_only)+'_feat_'+str(train_feature)+'_se_'+'_pl_'+str(pl_coef)
     import json
     f = open('vocab.json')
     vocab = json.load(f)
     print(vocab)
 
     from data import load_dataset
-    dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise, enhance)
+    dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise)
     transcriptions_1 = []
     transcriptions_3 = []
     transcriptions_5 = []
@@ -304,7 +302,6 @@ if __name__ == '__main__':
     print(f'div_coef = {str(div_coef)}')
     print(f'bias_only = {bias_only}')
     print(f'train_feature = {train_feature}')
-    print(f'enhance = {str(enhance)}')
     print(f'pl_coef = {pl_coef}')
 
     # load model and tokenizer
@@ -431,7 +428,6 @@ if __name__ == '__main__':
         f.write(f'div_coef = {str(div_coef)}\n')
         f.write(f'bias_only = {str(bias_only)}\n')
         f.write(f'train_feature = {str(train_feature)}\n')
-        f.write(f'enhance = {str(enhance)}\n')
         f.write(f'pl_coef = {pl_coef}\n')
 
     

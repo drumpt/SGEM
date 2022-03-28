@@ -1,0 +1,6 @@
+torch
+transformers
+pandas
+jiwer
+torchaudio
+soundfile

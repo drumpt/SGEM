@@ -1,19 +1,9 @@
-from argparse import ArgumentParser
-from ast import parse
-from importlib.util import module_for_loader
 import os 
-import glob
-import re
-from tqdm import tqdm 
-import soundfile as sf
 import torch
 import pandas as pd
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 from torch import nn
-import torch.optim as optim
 from jiwer import wer
-import pytorch_warmup as warmup
-
 
 def setup_optimizer(params, opt_name='AdamW', lr=1e-4, beta=0.9, weight_decay=0., scheduler=None, step_size=1, gamma=0.7):
     opt = getattr(torch.optim, opt_name)
@@ -250,7 +240,6 @@ if __name__ == '__main__':
     parser.add_argument('--em_coef', type=float, default=1.)
     parser.add_argument('--reweight', action='store_true')
     parser.add_argument('--bias_only', action='store_true')
-    parser.add_argument('--enhance', action='store_true')
     parser.add_argument('--train_feature', action='store_true')
     parser.add_argument('--train_all', action='store_true')
     parser.add_argument('--batch_size', type=int, default=1)
@@ -287,14 +276,13 @@ if __name__ == '__main__':
     bias_only = args.bias_only
     train_feature = args.train_feature
     train_all = args.train_all
-    enhance = args.enhance
     skip_short_thd = None
     train_LN = True
 
-    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)+'_noise_'+str(extra_noise)+'_rew_'+str(reweight)+'_div_'+str(div_coef)+'_bias_'+str(bias_only)+'_feat_'+str(train_feature)+'_se_'+str(enhance)+'_all_'+str(train_all)+'_LN_'+str(train_LN)
+    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)+'_noise_'+str(extra_noise)+'_rew_'+str(reweight)+'_div_'+str(div_coef)+'_bias_'+str(bias_only)+'_feat_'+str(train_feature)+'_all_'+str(train_all)+'_LN_'+str(train_LN)
 
     from data import load_dataset
-    dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise, enhance)
+    dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise)
     transcriptions_1 = []
     transcriptions_3 = []
     transcriptions_5 = []
@@ -324,7 +312,6 @@ if __name__ == '__main__':
     print(f'train_feature = {train_feature}')
     print(f'train_all = {train_all}')
     print(f'train_LN = {train_LN}')
-    print(f'enhance = {str(enhance)}')
 
     # load model and tokenizer
     processor = Wav2Vec2Processor.from_pretrained(asr, sampling_rate=SAMPLE_RATE, return_attention_mask=True)
@@ -476,7 +463,6 @@ if __name__ == '__main__':
         f.write(f'train_feature = {str(train_feature)}\n')
         f.write(f'train_all = {str(train_all)}\n')
         f.write(f'train_LN = {str(train_LN)}\n')
-        f.write(f'enhance = {str(enhance)}\n')
     
     csv_path = os.path.join(log_dir, exp_name+'.csv')
     df = pd.DataFrame({'duration': durations, 'WERR': werrs})
