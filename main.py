@@ -7,7 +7,7 @@ import re
 from tqdm import tqdm 
 import soundfile as sf
 import torch
-from datasets import load_dataset
+import pandas as pd
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 from torch import nn
 import torch.optim as optim
@@ -69,7 +69,7 @@ def div_loss(x, non_blank=None, L_thd=64):
 
     return loss
 
-def collect_params(model, bias_only=False, train_feature=False, train_all=False):
+def collect_params(model, bias_only=False, train_feature=False, train_all=False, train_LN=True):
     """Collect the affine scale + shift parameters from batch norms.
 
     Walk the model's modules and collect all batch normalization parameters.
@@ -88,12 +88,13 @@ def collect_params(model, bias_only=False, train_feature=False, train_all=False)
     
     for nm, m in model.named_modules():
         print(nm)
-        if isinstance(m, nn.LayerNorm):
-            for np, p in m.named_parameters():
-                if np in trainable:  
-                    p.requires_grad = True
-                    params.append(p)
-                    names.append(f"{nm}.{np}")
+        if train_LN: 
+            if isinstance(m, nn.LayerNorm):
+                for np, p in m.named_parameters():
+                    if np in trainable:  
+                        p.requires_grad = True
+                        params.append(p)
+                        names.append(f"{nm}.{np}")
         if train_feature:
             if len(str(nm).split('.')) > 1:
                 if str(nm).split('.')[1] == 'feature_extractor' or str(nm).split('.')[1] == 'feature_projection':
@@ -107,6 +108,7 @@ def collect_params(model, bias_only=False, train_feature=False, train_all=False)
                 p.requires_grad = True
                 params.append(p)
                 names.append(f"{nm}.{np}")
+            
 
     return params, names
 
@@ -250,6 +252,7 @@ if __name__ == '__main__':
     parser.add_argument('--bias_only', action='store_true')
     parser.add_argument('--enhance', action='store_true')
     parser.add_argument('--train_feature', action='store_true')
+    parser.add_argument('--train_all', action='store_true')
     parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--temp', type=float, default=2.5)
     parser.add_argument('--non_blank', action='store_true')
@@ -283,10 +286,12 @@ if __name__ == '__main__':
     div_coef = args.div_coef
     bias_only = args.bias_only
     train_feature = args.train_feature
+    train_all = args.train_all
     enhance = args.enhance
     skip_short_thd = None
+    train_LN = True
 
-    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)+'_noise_'+str(extra_noise)+'_rew_'+str(reweight)+'_div_'+str(div_coef)+'_bias_'+str(bias_only)+'_feat_'+str(train_feature)+'_se_'+str(enhance)
+    exp_name = dataset_name+'_'+str(em_coef)+'_'+str(steps)+'_'+str(temp)+'_'+asr.split('/')[-1]+'_'+'non_blank'+str(non_blank)+'_noise_'+str(extra_noise)+'_rew_'+str(reweight)+'_div_'+str(div_coef)+'_bias_'+str(bias_only)+'_feat_'+str(train_feature)+'_se_'+str(enhance)+'_all_'+str(train_all)+'_LN_'+str(train_LN)
 
     from data import load_dataset
     dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise, enhance)
@@ -298,7 +303,9 @@ if __name__ == '__main__':
     transcriptions_40 = []
     gt_texts = []
     ori_transcriptions = []
-    
+    durations = []
+    werrs = []
+
     print('------------------------------------')
     print(f'exp: {exp_name}')
     print(f'eposidic? {episodic}')
@@ -315,6 +322,8 @@ if __name__ == '__main__':
     print(f'div_coef = {str(div_coef)}')
     print(f'bias_only = {bias_only}')
     print(f'train_feature = {train_feature}')
+    print(f'train_all = {train_all}')
+    print(f'train_LN = {train_LN}')
     print(f'enhance = {str(enhance)}')
 
     # load model and tokenizer
@@ -323,7 +332,7 @@ if __name__ == '__main__':
     
     # set up for tent
     model = configure_model(model)
-    params, param_names = collect_params(model, bias_only, train_feature)
+    params, param_names = collect_params(model, bias_only, train_feature, train_all, train_LN)
     optimizer, scheduler = setup_optimizer(params, opt, lr, scheduler=scheduler)
 
     if episodic: 
@@ -340,6 +349,8 @@ if __name__ == '__main__':
         
         inputs = processor(wavs, return_tensors="pt", padding="longest")
         input_values = inputs.input_values.cuda()
+        duration = input_values.shape[1] / SAMPLE_RATE
+        durations.append(duration)
         
         if episodic: 
             model, optimizer, scheduler = load_model_and_optimizer(model, optimizer, model_state, optimizer_state, scheduler_state)
@@ -393,6 +404,8 @@ if __name__ == '__main__':
                     transcription = processor.batch_decode(predicted_ids)
                     ada_wer = wer(list(texts), list(transcription))
                     print("adapt-10 WER: ", ada_wer)
+                    werr = ori_wer - ada_wer
+                    werrs.append(werr)
                     # print(texts, transcription)
                     transcriptions_10 += transcription
                     
@@ -461,8 +474,13 @@ if __name__ == '__main__':
         f.write(f'div_coef = {str(div_coef)}\n')
         f.write(f'bias_only = {str(bias_only)}\n')
         f.write(f'train_feature = {str(train_feature)}\n')
+        f.write(f'train_all = {str(train_all)}\n')
+        f.write(f'train_LN = {str(train_LN)}\n')
         f.write(f'enhance = {str(enhance)}\n')
-
+    
+    csv_path = os.path.join(log_dir, exp_name+'.csv')
+    df = pd.DataFrame({'duration': durations, 'WERR': werrs})
+    df.to_csv(csv_path)
     
 
 
