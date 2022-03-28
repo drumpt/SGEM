@@ -1,4 +1,4 @@
-# Listen, Adapt, Better WER: Source-free Single-utterance Test-timeAdaptation for Automatic Speech Recognition [On-going project]
+# Listen, Adapt, Better WER: Source-free Single-utterance Test-time Adaptation for Automatic Speech Recognition [On-going project]
 ### Introduction
 Given a CTC-based trained ASR model, we can adapt our source ASR model for one utterance by unsupervised objectives (such as entropy minimization, minimum class confusion). 
 
