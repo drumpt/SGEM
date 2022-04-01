@@ -111,8 +111,6 @@ def consist_loss(model, input_values, outputs):
     model.wav2vec2.encoder.dropout.train()
     noisy_outputs = model(input_values).logits
 
-    # loss = F.mse_loss(noisy_outputs, targets, reduction='mean')
-
     import json
     f = open('vocab.json')
     vocab = json.load(f)
@@ -203,18 +201,11 @@ def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1.,
     if div_coef > 0: 
         d_loss = div_loss(outputs, not_blank) 
         loss += d_loss * div_coef 
-    # print(f'e_loss = {e_loss}; c_loss = {c_loss}; d_loss = {d_loss}') 
-    # con_coef = 0.5
-    # print(consist_loss(model, x, outputs))
-    # loss = loss * (1-con_coef) + consist_loss(model, x, outputs) * con_coef
 
     loss.backward()
-    # grad = cal_grad(model)
-    # print(grad)
     optimizer.step()
     if scheduler is not None: 
         scheduler.step()
-    # optimizer.zero_grad()
     model.zero_grad()
 
     # inference again
@@ -248,12 +239,6 @@ if __name__ == '__main__':
     parser.add_argument('--log_dir', type=str, default='./exps')
     parser.add_argument('--extra_noise', type=float, default=0.)
     parser.add_argument('--scheduler', default=None)
-    
-    
-    # asr = "facebook/wav2vec2-base-960h"
-    # asr = "facebook/wav2vec2-large-960h-lv60-self"
-    # asr = "facebook/wav2vec2-large-960h-lv60"
-    # asr = "facebook/wav2vec2-large-robust-ft-swbd-300h"
 
     args = parser.parse_args()
     asr = args.asr
