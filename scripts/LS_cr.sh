@@ -12,6 +12,7 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --non_blank \
                 --train_feature \
                 --extra_noise 0 \
+                --method cr \
 
 # LS + 0.005
 python main.py --asr facebook/wav2vec2-base-960h \
@@ -27,6 +28,7 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --non_blank \
                 --train_feature \
                 --extra_noise 0.005 \
+                --method cr \
 
 # LS + 0.01
 python main.py --asr facebook/wav2vec2-base-960h \
@@ -42,3 +44,4 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --non_blank \
                 --train_feature \
                 --extra_noise 0.01 \
+                --method cr \

@@ -11,7 +11,6 @@ def collect_audio_batch(batch, extra_noise=0., maxLen=600000):
        e.g. [(file1,txt1),(file2,txt2),...]
     '''
     def audio_reader(filepath):
-        
         wav, sample_rate = torchaudio.load(filepath)
         if sample_rate != SAMPLE_RATE:
             wav = torchaudio.transforms.Resample(sample_rate, SAMPLE_RATE)(wav)
@@ -21,7 +20,6 @@ def collect_audio_batch(batch, extra_noise=0., maxLen=600000):
             wav = wav[:maxLen]
             print(wav.shape)
         wav += extra_noise * torch.randn_like(wav)
-        
         return wav
 
     # Bucketed batch should be [[(file1,txt1),(file2,txt2),...]]
