@@ -316,9 +316,6 @@ if __name__ == '__main__':
 
     if episodic: 
         model_state, optimizer_state, scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
-
-    
-    print(param_names)
     
     for batch in dataset:
         lens, wavs, texts, files = batch
@@ -338,12 +335,13 @@ if __name__ == '__main__':
         ori_transcription = processor.batch_decode(predicted_ids)
         ori_transcriptions += ori_transcription
         ori_wer = wer(list(texts), list(ori_transcription))
-        print("original WER: ", ori_wer)
 
         # SUTA
         for i in range(steps): 
             outputs = forward_and_adapt(input_values, model, optimizer, em_coef, reweight, temp, non_blank, scheduler, 
                             div_coef=0, repeat_inference=True, pl_coef=1., vocab=vocab, processor=processor)
+            print(i)
+            print(outputs)
             if episodic: 
                 if i == 0: 
                     predicted_ids = torch.argmax(outputs, dim=-1)

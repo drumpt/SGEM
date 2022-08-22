@@ -24,6 +24,7 @@ class LibriDataset(Dataset):
         self.path = path
         self.bucket_size = bucket_size
         split = ['test-other']
+
         # List all wave files
         file_list = []
         for s in split: 
