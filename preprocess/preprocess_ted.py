@@ -2,10 +2,14 @@ import soundfile as sf
 import os
 import re 
 
-stm_path = '/home/daniel094144/data/TEDLIUM_release2/test/stm'
-audio_path  = '/home/daniel094144/data/TEDLIUM_release2/test/wav'
-save_audio_dir = '/home/daniel094144/data/TEDLIUM_release2/test/wav_segment'
-save_text_dir = '/home/daniel094144/data/TEDLIUM_release2/test/transcription'
+# stm_path = '/home/daniel094144/data/TEDLIUM_release2/test/stm'
+# audio_path  = '/home/daniel094144/data/TEDLIUM_release2/test/wav'
+# save_audio_dir = '/home/daniel094144/data/TEDLIUM_release2/test/wav_segment'
+# save_text_dir = '/home/daniel094144/data/TEDLIUM_release2/test/transcription'
+stm_path = '/home/server08/hdd0/changhun_workspace/TEDLIUM_release2/test/stm'
+audio_path  = '/home/server08/hdd0/changhun_workspace/TEDLIUM_release2/test/wav'
+save_audio_dir = '/home/server08/hdd0/changhun_workspace/TEDLIUM_release2/test/wav_segment'
+save_text_dir = '/home/server08/hdd0/changhun_workspace/TEDLIUM_release2/test/transcription'
 
 SAMPLE_RATE = 16000
 
@@ -16,7 +20,6 @@ def preprocess_text(text):
     text = text.replace("-", " ")
     text = re.sub("[^ A-Z']", "", text)
     text = ' '.join(text.split())
-    
     return text
 
 skip = 'inter_segment_gap'
@@ -37,6 +40,10 @@ for stm_path in glob.glob(os.path.join(stm_path, '*.stm')):
             if curr_file != name: 
                 print('---new---')
                 print(name)
+
+                print(stm_path)
+                print(os.path.join(audio_path, name+'.wav'))
+
                 wav, sr = sf.read(os.path.join(audio_path, name+'.wav'))
                 print(wav.shape)
                 
