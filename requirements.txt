@@ -1,6 +1,11 @@
 torch
+torchaudio
 transformers
+audio_augmentations
+torch_intermediate_layer_getter
+
 pandas
 jiwer
-torchaudio
 soundfile
+matplotlib
+seaborn

@@ -1,4 +1,4 @@
-# LS + 0
+# LS + 0.01
 python main.py --asr facebook/wav2vec2-base-960h \
                 --steps 10 \
                 --dataset_name librispeech \
@@ -8,10 +8,10 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --em_coef 0.3 \
                 --reweight \
                 --log_dir exps \
-                --lr 2e-5 \
+                --lr 2e-6 \
                 --non_blank \
-                --train_feature \
-                --extra_noise 0 \
+                --train_all \
+                --extra_noise 0.01 \
                 --method cr \
 
 # LS + 0.005
@@ -24,13 +24,13 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --em_coef 0.3 \
                 --reweight \
                 --log_dir exps \
-                --lr 2e-5 \
+                --lr 2e-6 \
                 --non_blank \
-                --train_feature \
+                --train_all \
                 --extra_noise 0.005 \
                 --method cr \
 
-# LS + 0.01
+# LS + 0
 python main.py --asr facebook/wav2vec2-base-960h \
                 --steps 10 \
                 --dataset_name librispeech \
@@ -40,8 +40,8 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --em_coef 0.3 \
                 --reweight \
                 --log_dir exps \
-                --lr 2e-5 \
+                --lr 2e-6 \
                 --non_blank \
-                --train_feature \
-                --extra_noise 0.01 \
+                --train_all \
+                --extra_noise 0 \
                 --method cr \

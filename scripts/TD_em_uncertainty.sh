@@ -11,3 +11,4 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --lr 2e-5 \
                 --train_feature \
                 --extra_noise 0 \
+                --method em_uncertainty \
