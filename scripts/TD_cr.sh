@@ -3,11 +3,11 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --dataset_name ted \
                 --dataset_dir /home/server08/hdd0/changhun_workspace/TEDLIUM_release2/test \
                 --temp 2.5 \
-                --non_blank \
                 --em_coef 0.3 \
                 --reweight \
                 --log_dir exps \
-                --lr 2e-5 \
+                --lr 2e-6 \
+                --non_blank \
                 --train_feature \
-                --extra_noise 0 \
-                --episodic \
+                --method cr \
+                --teacher_student \

@@ -6,11 +6,11 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --em_coef 0.3 \
                 --reweight \
                 --log_dir exps \
-                --lr 2e-6 \
+                --lr 5e-6 \
                 --non_blank \
-                --train_all \
-                --extra_noise 0.01 \
+                --train_feature \
                 --method cr \
+                --episodic \
                 --teacher_student \
 
 # python main.py --asr facebook/wav2vec2-base-960h \
@@ -25,5 +25,4 @@ python main.py --asr facebook/wav2vec2-base-960h \
 #                 --lr 2e-6 \
 #                 --non_blank \
 #                 --train_all \
-#                 --extra_noise 0.01 \
 #                 --method cr \

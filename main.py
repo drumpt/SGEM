@@ -1,7 +1,9 @@
-import os 
+import os
+from random import sample 
 import time
 import argparse
 import json
+import hydra
 from copy import deepcopy
 from datetime import datetime
 from queue import Queue
@@ -10,10 +12,10 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import pandas as pd
+from speechbrain.lobes.augment import TimeDomainSpecAugment, SpecAugment
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 from jiwer import wer
 from audio_augmentations import *
-from torch_intermediate_layer_getter import IntermediateLayerGetter as MidGetter
 
 from data import load_dataset
 
@@ -34,16 +36,16 @@ def setup_optimizer(params, opt_name='AdamW', lr=1e-4, beta=0.9, weight_decay=0.
         return optimizer, None
 
 
-def softmax_entropy(x, dim=2):
+def softmax_entropy(x, dim=-1):
     # Entropy of softmax distribution from logits
     return -(x.softmax(dim) * x.log_softmax(dim)).sum(dim)
 
 
-def mcc_loss(x, reweight=False, dim=2, class_num=32):
+def mcc_loss(x, reweight=False, dim=-1, class_num=32):
     p = x.softmax(dim) # (1, L, D)
     p = p.squeeze(0) # (L, D)
     if reweight: # (1, L, D) * (L, 1) 
-        target_entropy_weight = softmax_entropy(x, dim=2).detach().squeeze(0) # instance-wise entropy (1, L, D)
+        target_entropy_weight = softmax_entropy(x, dim=-1).detach().squeeze(0) # instance-wise entropy (1, L, D)
         target_entropy_weight = 1 + torch.exp(-target_entropy_weight) # (1, L)
         target_entropy_weight = x.shape[1] * target_entropy_weight / torch.sum(target_entropy_weight)
         cov_matrix_t = p.mul(target_entropy_weight.view(-1, 1)).transpose(1, 0).mm(p)
@@ -108,8 +110,7 @@ def collect_params(model, bias_only=False, train_feature=False, train_all=False,
             for np, p in m.named_parameters():
                 p.requires_grad = True
                 params.append(p)
-                names.append(f"{nm}.{np}")
-    
+                names.append(f"{nm}.{np}")    
     return params, names
 
 
@@ -150,7 +151,7 @@ def copy_model_and_optimizer(model, optimizer, scheduler):
         return model_state, optimizer_state, None
 
 
-def load_model_and_optimizer(model, optimizer, model_state, optimizer_state, scheduler_state):
+def load_model_and_optimizer(model, optimizer, scheduler, model_state, optimizer_state, scheduler_state):
     """Restore the model and optimizer states from copies."""
     model.load_state_dict(model_state, strict=True)
     optimizer.load_state_dict(optimizer_state)
@@ -194,7 +195,7 @@ def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1.,
     loss = 0
 
     if em_coef > 0:
-        if not_blank:      
+        if not_blank:
             e_loss = softmax_entropy(outputs / temp)[non_blank].mean(0).mean()
         else: 
             e_loss = softmax_entropy(outputs / temp).mean(0).mean() 
@@ -241,9 +242,11 @@ def forward_and_adapt_em_uncertainty(x, model, optimizer, em_coef=0.9, reweight=
     if em_coef > 0:
         if not_blank:
             frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)[non_blank]), dim=0).detach()
+            # frame_weight = F.normalize(softmax_entropy(outputs)[non_blank], dim=0).detach()
             e_loss = torch.sum(frame_weight * softmax_entropy(outputs / temp)[non_blank], dim=0).mean()
         else:
             frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)), dim=0).detach()
+            # frame_weight = F.normalize(softmax_entropy(outputs), dim=0).detach()
             e_loss = torch.sum(frame_weight * softmax_entropy(outputs / temp), dim=0).mean()
         
         loss += e_loss * em_coef
@@ -288,17 +291,17 @@ def forward_and_adapt_em_sparse(x, model, optimizer, em_coef=0.9, reweight=False
     if em_coef > 0:
         if not_blank:
             uncertainty_upper_bound = 0.05
-            # entropy_per_frame = softmax_entropy(outputs, dim=2)[non_blank]
+            # entropy_per_frame = softmax_entropy(outputs, dim=-1)[non_blank]
             # if len(entropy_per_frame) == 0:
             #     return outputs
             # uncertainty_upper_bound = torch.quantile(entropy_per_frame, 0.5)
-            selected_frame = non_blank & torch.where(softmax_entropy(outputs, dim=2) < uncertainty_upper_bound, 1, 0).bool()
+            selected_frame = non_blank & torch.where(softmax_entropy(outputs, dim=-1) < uncertainty_upper_bound, 1, 0).bool()
             e_loss = softmax_entropy(outputs / temp)[selected_frame].mean(0).mean()
         else:
             uncertainty_upper_bound = 0.05
-            # entropy_per_frame = softmax_entropy(outputs, dim=2)
+            # entropy_per_frame = softmax_entropy(outputs, dim=-1)
             # uncertainty_upper_bound = torch.quantile(entropy_per_frame, 0.5)
-            selected_frame = torch.where(softmax_entropy(outputs, dim=2) < uncertainty_upper_bound, 1, 0).bool()
+            selected_frame = torch.where(softmax_entropy(outputs, dim=-1) < uncertainty_upper_bound, 1, 0).bool()
             e_loss = softmax_entropy(outputs / temp)[selected_frame].mean(0).mean() 
         
         loss += e_loss * em_coef
@@ -343,66 +346,115 @@ def forward_and_adapt_cr(x, model, optimizer, em_coef=0.9, reweight=False, temp=
     # attack.generate(x.numpy(), np.array(["Hello"]))
 
     # audio augmentation using fixmatch
-    num_chunks = 8
-    th = 0.5
-    weak_transforms = [
-        RandomApply([PolarityInversion()], p=0.1),
-        RandomApply([Noise(min_snr=0.001, max_snr=0.005)], p=0.1),
-        RandomApply([PitchShift(n_samples=16000*5, sample_rate=16000)], p=0.1),
-        RandomApply([Reverb(sample_rate=16000)], p=0.1),
-    ]
-    weak_augmentation = ComposeMany(transforms=weak_transforms, num_augmented_samples=1)
+    num_chunks = 2
+    # weak_transforms = [
+    #     RandomApply([PolarityInversion()], p=0.5),
+    #     Noise(min_snr=0.001, max_snr=0.005),
+    #     # RandomApply([Noise(min_snr=0.001, max_snr=0.005)], p=0.2),
+    #     # RandomApply([PitchShift(n_samples=16000*5, sample_rate=16000)], p=0.2),
+    #     # RandomApply([Reverb(sample_rate=16000)], p=0.2),
+    # ]
+    # weak_augmentation = ComposeMany(transforms=weak_transforms, num_augmented_samples=1)
 
-    strong_transforms = [
-        RandomApply([PolarityInversion()], p=0.7),
-        RandomApply([Noise(min_snr=0.01, max_snr=0.05)], p=0.7),
-        RandomApply([Gain()], p=0.7),
-        RandomApply([HighLowPass(sample_rate=16000)], p=0.7),
-        RandomApply([PitchShift(n_samples=16000*5, sample_rate=16000)], p=0.7),
-        RandomApply([Reverb(sample_rate=16000)], p=0.7),
-    ]
-    strong_augmentation = ComposeMany(transforms=strong_transforms, num_augmented_samples=1)
+    weak_augmentation = TimeDomainSpecAugment(
+        perturb_prob=0.5, drop_freq_prob=0.5, drop_chunk_prob=0.5, speeds=[100],
+        drop_freq_count_low=0, drop_freq_count_high=3, drop_chunk_count_low=0, drop_chunk_count_high=3
+    )
+    strong_augmentation = TimeDomainSpecAugment(
+        perturb_prob=1, drop_freq_prob=1, drop_chunk_prob=1, speeds=[100],
+        drop_freq_count_low=3, drop_freq_count_high=5, drop_chunk_count_low=3, drop_chunk_count_high=5, drop_chunk_noise_factor=0
+    )
+
+    # strong_transforms = [
+    #     RandomApply([PolarityInversion()], p=0.5),
+    #     # RandomApply([Noise(min_snr=0.01, max_snr=0.05)], p=0.7),
+    #     Noise(min_snr=0.01, max_snr=0.05),
+    #     RandomApply([Gain()], p=0.7),
+    #     # RandomApply([HighLowPass(sample_rate=16000)], p=0.7),
+    #     # RandomApply([PitchShift(n_samples=16000*5, sample_rate=16000)], p=0.7),
+    #     RandomApply([Reverb(sample_rate=16000)], p=0.7),
+    # ]
+    # strong_augmentation = ComposeMany(transforms=strong_transforms, num_augmented_samples=1)
 
     for sub_x in x.chunk(num_chunks, dim=1):
-        weak_x = weak_augmentation(sub_x.detach().cpu())
+        weak_x = weak_augmentation(sub_x.detach().cpu(), torch.ones(1))
 
         if teacher_model:
-            with torch.no_grad():
-                outputs = teacher_model.wav2vec2(weak_x.to('cuda'))
-                hidden_states = outputs[0]
-                hidden_states = model.dropout(hidden_states)
-
             weak_outputs = teacher_model(weak_x.to('cuda')).logits
+            # with torch.no_grad():
+            #     outputs = teacher_model.wav2vec2(weak_x.to('cuda'))
+            #     hidden_states = outputs[0]
+            #     hidden_states = model.dropout(hidden_states)
 
-            if len(memory_queue.queue) < n_neighbors:
-                weak_probs = F.softmax(weak_outputs, dim=2)
-            else:
-                pseudo_prob = []
-                for hidden_state in hidden_states.squeeze(0):
-                    candidates = []
-                    for previous_hidden_state, prob in memory_queue.queue:
-                        candidates.append((torch.norm(hidden_state - previous_hidden_state), prob))
-                    candidates.sort(key=lambda x: x[0])
+            # if len(memory_queue.queue) < n_neighbors:
+            #     weak_probs = F.softmax(weak_outputs, dim=-1)
+            # else:
+            #     pseudo_prob = []
+            #     for hidden_state in hidden_states.squeeze(0):
+            #         candidates = []
+            #         for previous_hidden_state, prob in memory_queue.queue:
+            #             candidates.append((torch.norm(hidden_state - previous_hidden_state), prob))
+            #         candidates.sort(key=lambda x: x[0])
                     
-                    weak_prob_for_one = torch.mean(torch.stack([x[1] for x in candidates[:n_neighbors]]), dim=0)
-                    pseudo_prob.append(weak_prob_for_one)
-                weak_probs = torch.stack(pseudo_prob).unsqueeze(0)
+            #         weak_prob_for_one = torch.mean(torch.stack([x[1] for x in candidates[:n_neighbors]]), dim=0)
+            #         pseudo_prob.append(weak_prob_for_one)
+            #     weak_probs = torch.stack(pseudo_prob).unsqueeze(0)
 
-            for hidden_state, logit in zip(hidden_states.squeeze(0), weak_outputs.squeeze(0)):
-                if memory_queue.full():
-                    memory_queue.get()
-                memory_queue.put((hidden_state, F.softmax(logit, -1)))
+            # for hidden_state, logit in zip(hidden_states.squeeze(0), weak_outputs.squeeze(0)):
+            #     if memory_queue.full():
+            #         memory_queue.get()
+            #     memory_queue.put((hidden_state, F.softmax(logit, -1)))
         else:
-            with torch.no_grad():
-                outputs = model.wav2vec2(weak_x.to('cuda'))
-                hidden_states = outputs[0]
-                hidden_states = model.dropout(hidden_states)
             weak_outputs = model(weak_x.to('cuda')).logits
+            # with torch.no_grad():
+            #     outputs = model.wav2vec2(weak_x.to('cuda'))
+            #     hidden_states = outputs[0]
+            #     hidden_states = model.dropout(hidden_states)
 
-        confidence, _ = torch.max(weak_probs, dim=2)
-        selected_frame = torch.where(confidence > th, 1, 0).bool()
+        weak_probs = F.softmax(weak_outputs, dim=-1)
+        weak_max_idx = torch.argmax(weak_probs, dim=-1, keepdim=True)
+        weak_one_hots = torch.FloatTensor(weak_probs.shape).zero_().to('cuda').scatter(2, weak_max_idx, 1)
 
-        strong_x = strong_augmentation(sub_x.detach().cpu())
+        # ------- start adversarial attack -------
+
+        # model.eval()
+
+        # n_steps = 10
+        # noise = torch.zeros_like(weak_x).requires_grad_()
+        # for _ in range(n_steps):
+        #     adversarial_outputs = model(weak_x.cuda() + noise.cuda()).logits
+        #     adv_loss = - ce_loss(adversarial_outputs, weak_one_hots.cuda()) + (1e-2 * torch.max(torch.tensor([0]), torch.norm(noise, p=2) - 0.4)).cuda()
+        #     # adv_loss = - ce_loss(adversarial_outputs, weak_one_hots.cuda())
+        #     adv_loss.backward()
+        #     noise = noise + 5e-3 * noise.grad.data.sign()
+        #     noise = noise.detach().requires_grad_()
+        # torchaudio.save("benign_example.wav", weak_x, 16000)
+        # torchaudio.save("adversarial_example.wav", weak_x + noise, 16000)
+
+        # adv_outputs = model(weak_x.cuda() + noise.cuda()).logits
+        # adv_probs = F.softmax(adv_outputs, dim=-1)
+        # adv_max_idx = torch.argmax(adv_probs, dim=-1, keepdim=True)
+
+        # print(f"weak_max_idx : {weak_max_idx.flatten()}")
+        # print(f"adv_max_idx : {adv_max_idx.flatten()}")
+        # print(f"(weak_max_idx == adv_max_idx).float().mean() : {(weak_max_idx == adv_max_idx).float().mean()}")
+
+        # model.train()
+
+        # ------- end adversarial attack -------
+
+        non_blank = torch.where(weak_max_idx != 0, 1, 0).bool()
+        confidence, _ = torch.max(weak_probs, dim=-1, keepdim=True)
+
+        th = 0.9
+        # selected_frames = non_blank & torch.where(confidence > th, 1, 0).bool()
+        selected_frames = non_blank & torch.where(confidence > th, 1, 0).bool()
+        selected_frames = selected_frames.expand_as(weak_probs)
+
+        # TODO: non_blank / th / augmentation
+        # selected_frame = non_blank & torch.where(softmax_entropy(outputs, dim=-1) < th, 1, 0).bool()
+
+        strong_x = strong_augmentation(sub_x.detach().cpu(), torch.ones(1))
         strong_outputs = model(strong_x.to('cuda')).logits
 
         # loss += ce_loss(strong_outputs[selected_frame], weak_probs[selected_frame].detach())
@@ -415,12 +467,17 @@ def forward_and_adapt_cr(x, model, optimizer, em_coef=0.9, reweight=False, temp=
         #             weak_prob[selected_frame[i]].detach()
         #         )
 
-        for _, weak_prob in enumerate(weak_probs):
-            for strong_output in strong_outputs:
-                loss += ce_loss(
-                    strong_output,
-                    weak_prob.detach()
-                )
+        for strong_output, weak_one_hot, selected_frame in zip(strong_outputs, weak_one_hots, selected_frames):
+            loss += ce_loss(
+                strong_output * selected_frame,
+                (weak_one_hot * selected_frame).detach()
+            )
+
+    # outputs = model(x).logits
+    # predicted_ids = torch.argmax(outputs, dim=-1)
+    # non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
+    # e_loss = softmax_entropy(outputs / temp)[non_blank].mean(0).mean()
+    # loss += e_loss
 
     optimizer.zero_grad()
     loss.backward()
@@ -440,59 +497,34 @@ def forward_and_adapt_cr(x, model, optimizer, em_coef=0.9, reweight=False, temp=
             outputs = model(x).logits
     return outputs
 
-
-
-if __name__ == '__main__':
-    SAMPLE_RATE = 16000
-    parser = argparse.ArgumentParser(description="TTA ASR")
-    parser.add_argument('--asr', type=str, default="facebook/wav2vec2-base-960h")
-    parser.add_argument('--steps', type=int, default=40)
-    parser.add_argument('--episodic', action='store_true')
-    parser.add_argument('--div_coef', type=float, default=0.)
-    parser.add_argument('--opt', type=str, default='AdamW')
-    parser.add_argument('--dataset_name', type=str, default='librispeech')
-    parser.add_argument('--dataset_dir', type=str, default='/mnt/hdd0/changhun_workspace/LibriSpeech')
-    parser.add_argument('--split', default=['test-other'])
-    parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--em_coef', type=float, default=1.)
-    parser.add_argument('--reweight', action='store_true')
-    parser.add_argument('--bias_only', action='store_true')
-    parser.add_argument('--train_feature', action='store_true')
-    parser.add_argument('--train_all', action='store_true')
-    parser.add_argument('--batch_size', type=int, default=1)
-    parser.add_argument('--temp', type=float, default=2.5)
-    parser.add_argument('--non_blank', action='store_true')
-    parser.add_argument('--log_dir', type=str, default='./exps')
-    parser.add_argument('--extra_noise', type=float, default=0.)
-    parser.add_argument('--scheduler', default=None)
-    parser.add_argument('--method', default='original')
-    parser.add_argument('--teacher_student', action='store_true')
-
-    args = parser.parse_args()
+@hydra.main(version_base=None, config_path="../conf", config_name="config")
+def main(args):
     asr = args.asr
-    steps = args.steps
-    episodic = args.episodic
-    opt = args.opt
-    dataset_dir = args.dataset_dir
     dataset_name = args.dataset_name
+    dataset_dir = args.dataset_dir
     split = args.split
-    lr = args.lr
-    em_coef = args.em_coef
-    reweight = args.reweight
     batch_size = args.batch_size
-    temp =  args.temp
-    non_blank = args.non_blank
-    log_dir = args.log_dir
     extra_noise = args.extra_noise
+
+    opt = args.opt
+    lr = args.lr
     scheduler = args.scheduler
-    div_coef = args.div_coef
+    steps = args.steps
+    train_params = args.train_params
     bias_only = args.bias_only
-    train_feature = args.train_feature
-    train_all = args.train_all
-    skip_short_thd = None
-    train_LN = True
+    episodic = args.episodic
+
     method = args.method
     teacher_student = args.teacher_student
+    memory_queue = args.memory_queue
+
+    non_blank = args.non_blank
+    reweight = args.reweight
+    div_coef = args.div_coef
+    em_coef = args.em_coef
+    temp =  args.temp
+
+    log_dir = args.log_dir
     exp_name = f"exp_{datetime.now().strftime('%m_%d_%Y_%H_%M_%S')}"
 
     dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise)
@@ -507,7 +539,6 @@ if __name__ == '__main__':
     durations = []
     werrs = []
 
-    print('------------------------------------')
     print(vars(args))
 
     # load model and tokenizer
@@ -523,7 +554,7 @@ if __name__ == '__main__':
         # student_model = configure_model(student_model)
         params, param_names = collect_params(student_model, bias_only, train_feature, train_all, train_LN)
         optimizer, scheduler = setup_optimizer(params, opt, lr, scheduler=scheduler)
-        if episodic: 
+        if episodic:
             model_state, optimizer_state, scheduler_state = copy_model_and_optimizer(student_model, optimizer, scheduler)
 
     else:
@@ -535,53 +566,6 @@ if __name__ == '__main__':
         if episodic: 
             model_state, optimizer_state, scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
-    # import nemo.collections.asr as nemo_asr
-    # asr_model = nemo_asr.models.ASRModel.from_pretrained("nvidia/stt_en_conformer_ctc_large")
-
-    # import inspect
-    # print("Hello")    
-    # print(inspect.signature(asr_model.forward))
-    # print(asr_model)
-    # print(type(asr_model))
-    # transcriptions = asr_model.transcribe(["file.wav"])
-    # object_methods = [method_name for method_name in dir(asr_model) if callable(getattr(object, method_name))]
-    # print(object_methods)
-
-    # from speechbrain.pretrained import EncoderDecoderASR
-    # asr_model = EncoderDecoderASR.from_hparams(source="speechbrain/asr-crdnn-rnnlm-librispeech", savedir="pretrained_models/asr-crdnn-rnnlm-librispeech")
-
-    # # forward-hook
-    # mid_getter = MidGetter(model, return_layers={'dropout': 'dropout'}, keep_output=True)
-    # activation_list = []
-    # id_list = []
-
-    # import json
-    # import torch
-    # from espnet.nets.pytorch_backend.e2e_asr import E2E
-    # from espnet2.bin.asr_inference import Speech2Text
-
-    # speech2text = Speech2Text.from_pretrained(
-    #     "kamo-naoyuki/librispeech_asr_train_asr_conformer5_raw_bpe5000_scheduler_confwarmup_steps25000_batch_bins140000000_optim_conflr0.0015_initnone_accum_grad2_sp_valid.acc.ave",
-    #     maxlenratio=0.0,
-    #     minlenratio=0.0,
-    #     beam_size=20,
-    #     ctc_weight=0.3,
-    #     lm_weight=0.5,
-    #     penalty=0.0,
-    #     nbest=1
-    # )
-
-    # model_dir = "espnet/egs/an4/asr1/exp/train_nodev_pytorch_train_mtlalpha0.5/results"
-    # # load model
-    # with open(model_dir + "/model.json", "r") as f:
-    #     idim, odim, conf = json.load(f)
-    # model = E2E.build(idim, odim, **conf)
-    # model.load_state_dict(torch.load(model_dir + "/model.acc.best"))
-    # model.cpu().eval()
-    # vocab = conf["char_list"]
-    # print(vocab)
-    # model
-
     queue_maxsize = 256
     n_neighbors = 6
 
@@ -592,14 +576,15 @@ if __name__ == '__main__':
     start = time.time()
     for batch in dataset:
         lens, wavs, texts, files = batch
-        
+
         inputs = processor(wavs, sampling_rate=SAMPLE_RATE, return_tensors="pt", padding="longest")
-        input_values = inputs.input_values.cuda()
+        input_values = inputs.input_values.cuda().squeeze(1)
         duration = input_values.shape[1] / SAMPLE_RATE
         durations.append(duration)
 
         if episodic:
-            model, optimizer, scheduler = load_model_and_optimizer(model, optimizer, model_state, optimizer_state, scheduler_state)
+            print("reload model")
+            model, optimizer, scheduler = load_model_and_optimizer(model, optimizer, None, model_state, optimizer_state, scheduler_state)
         
         # print(torch.tensor([input_values.shape[1]]).to('cuda').shape)
         # kwargs = {"input_signal": input_values.to('cuda'), "input_signal_length": torch.tensor([input_values.shape[1]]).to('cuda')}
@@ -631,12 +616,6 @@ if __name__ == '__main__':
         ori_wer = wer(list(texts), list(ori_transcription))
         print("\noriginal WER: ", ori_wer)
 
-        if skip_short_thd is not None: 
-            if outputs.shape[1] <= skip_short_thd:
-                print(f'do not adapt since length is {outputs.shape[1]}')
-                count += 1
-                continue
-        
         # # forward-hook
         # from matplotlib import pyplot as plt
         # import seaborn as sns
@@ -731,7 +710,16 @@ if __name__ == '__main__':
                 # print("adapt-40 WER: ", ada_wer)
                 # print(texts, transcription)
                 transcriptions_40 += transcription
-        
+
+        if teacher_student:
+            # stochastic restoration
+            for student_param, original_param in zip(student_model.parameters(), model.parameters()):
+                import numpy as np
+                p = 0.01
+                restore = np.random.binomial(n=1, p=p, size=1)[0]
+                with torch.no_grad():
+                    student_param.copy_(restore * student_param + (1 - restore) * original_param)
+
         del input_values
         torch.cuda.empty_cache()
         gt_texts += texts
@@ -773,13 +761,52 @@ if __name__ == '__main__':
     csv_path = os.path.join(log_dir, exp_name+'.csv')
     df = pd.DataFrame({'duration': durations, 'WERR': werrs})
     df.to_csv(csv_path)
-    
 
 
 
+transcriptions_1 = []
+transcriptions_3 = []
+transcriptions_5 = []
+transcriptions_10 = []
+transcriptions_20 = []
+transcriptions_40 = []
+gt_texts = []
+ori_transcriptions = []
+durations = []
+werrs = []
 
+for i, batch in enumerate(dataset):
+    lens, wavs, texts, files = batch
+    wavs = torch.tensor(wavs)
 
+    ori_transcription, _ = original_model.transcribe_batch(wavs, wav_lens=torch.tensor([1.0]))
+    ori_transcriptions += ori_transcription
+    ori_wer = wer(list(texts), list(ori_transcription))
+    gt_texts += texts
+    print(f"\n{i}/{len(dataset)}\noriginal WER: {ori_wer}")
 
+    model, optim, _ = load_model_and_optimizer(model, optim, None, model_state, optim_state, None)
+    for i in range(steps):
+        model.train()
+        forward_and_adapt_cr_attention(wavs, model, optim)
 
+        if i + 1 in [1, 3, 5, 10, 20, 40]:
+            model.eval()
+            transcription, _ = model.transcribe_batch(wavs, wav_lens=torch.tensor([1.0]))
+            ada_wer = wer(list(texts), list(transcription))            
+            print(f"adapt-{i + 1} WER: ", ada_wer)
+            transcription_list = eval(f"transcriptions_{i + 1}")
+            transcription_list += transcription
 
+    del wavs
+    torch.cuda.empty_cache()
 
+print("original WER:", wer(gt_texts, ori_transcriptions))
+if steps >= 10: 
+    print("TTA-1 WER:", wer(gt_texts, transcriptions_1))
+    print("TTA-3 WER:", wer(gt_texts, transcriptions_3))
+    print("TTA-5 WER:", wer(gt_texts, transcriptions_5))
+    print("TTA-10 WER:", wer(gt_texts, transcriptions_10))
+
+if __name__ == "__main__":
+    main()

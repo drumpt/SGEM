@@ -2,7 +2,8 @@ torch
 torchaudio
 transformers
 audio_augmentations
-torch_intermediate_layer_getter
+hydra-core==1.2.0
+hydra-colorlog==1.2.0
 
 pandas
 jiwer

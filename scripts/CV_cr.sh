@@ -8,7 +8,6 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --log_dir exps \
                 --lr 2e-6 \
                 --non_blank \
-                --train_all \
-                --extra_noise 0.01 \
+                --train_feature \
                 --method cr \
                 --teacher_student \
