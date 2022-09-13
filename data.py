@@ -30,7 +30,8 @@ def collect_audio_batch(batch, extra_noise=0., maxLen=600000):
     file, audio_feat, audio_len, text = [], [], [], []
     with torch.no_grad():
         for b in batch:
-            feat = audio_reader(str(b[0])).numpy()
+            # feat = audio_reader(str(b[0])).numpy()
+            feat = audio_reader(str(b[0]))
             file.append(str(b[0]).split('/')[-1].split('.')[0])
             audio_feat.append(feat)
             audio_len.append(len(feat))
@@ -40,7 +41,7 @@ def collect_audio_batch(batch, extra_noise=0., maxLen=600000):
     audio_len, file, audio_feat, text = zip(*[(feat_len, f_name, feat, txt)
                                               for feat_len, f_name, feat, txt in sorted(zip(audio_len, file, audio_feat, text), reverse=True, key=lambda x:x[0])])
 
-    return audio_len, audio_feat, text, file
+    return torch.tensor(audio_len), torch.stack(audio_feat), text, file
 
 
 def create_dataset(split, name, path, batch_size=1):

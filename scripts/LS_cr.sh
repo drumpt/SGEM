@@ -10,9 +10,10 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --log_dir exps \
                 --lr 2e-6 \
                 --non_blank \
-                --train_all \
+                --train_feature \
                 --extra_noise 0.01 \
                 --method cr \
+                --teacher_student \
 
 # LS + 0.005
 python main.py --asr facebook/wav2vec2-base-960h \
@@ -26,9 +27,10 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --log_dir exps \
                 --lr 2e-6 \
                 --non_blank \
-                --train_all \
+                --train_feature \
                 --extra_noise 0.005 \
                 --method cr \
+                --teacher_student \
 
 # LS + 0
 python main.py --asr facebook/wav2vec2-base-960h \
@@ -42,6 +44,7 @@ python main.py --asr facebook/wav2vec2-base-960h \
                 --log_dir exps \
                 --lr 2e-6 \
                 --non_blank \
-                --train_all \
+                --train_feature \
                 --extra_noise 0 \
                 --method cr \
+                --teacher_student \
