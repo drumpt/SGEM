@@ -1,81 +1,60 @@
 import os
-from random import sample 
-import time
-import argparse
-import json
-import hydra
-from copy import deepcopy
+import gc
+import logging
 from datetime import datetime
-from queue import Queue
+from copy import deepcopy
+from re import L
+# from queue import Queue
 
+import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
-import pandas as pd
-from speechbrain.lobes.augment import TimeDomainSpecAugment, SpecAugment
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
-from jiwer import wer
+
+from speechbrain.pretrained import EncoderDecoderASR
+from speechbrain.lobes.augment import TimeDomainSpecAugment, SpecAugment, EnvCorrupt
+from speechbrain.decoders.seq2seq import S2SRNNGreedySearcher, batch_filter_seq2seq_output
+
+import nemo.collections.asr as nemo_asr
+from nemo.collections.asr.parts.utils import rnnt_utils
+from nemo.collections.common.parts.rnn import label_collate
 from audio_augmentations import *
+
+from jiwer import wer
+import hydra
+from omegaconf import OmegaConf
 
 from data import load_dataset
 
 
-def setup_optimizer(params, opt_name='AdamW', lr=1e-4, beta=0.9, weight_decay=0., scheduler=None, step_size=1, gamma=0.7):
-    opt = getattr(torch.optim, opt_name)
-    if opt_name == 'Adam':       
-        optimizer = opt(params,
-                lr=lr,
-                betas=(beta, 0.999),
-                weight_decay=weight_decay)
-    else: 
-        optimizer = opt(params, lr=lr, weight_decay=weight_decay)
-    
-    if scheduler is not None: 
-        return optimizer, eval(scheduler)(optimizer, step_size=step_size, gamma=gamma)
-    else: 
-        return optimizer, None
+def get_logger(args):
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(message)s')
+
+    time_string = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    file_handler = logging.FileHandler(os.path.join(args.log_dir, f"log_{time_string}.txt"))
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    return logger
 
 
-def softmax_entropy(x, dim=-1):
-    # Entropy of softmax distribution from logits
-    return -(x.softmax(dim) * x.log_softmax(dim)).sum(dim)
+def get_model(args, original=False):
+    if args.asr.startswith("facebook"):
+        model = Wav2Vec2ForCTC.from_pretrained(args.asr).requires_grad_(True).eval()
+        if 'cuda' in args.device:
+            model = model.cuda()
+    elif args.asr.startswith("speechbrain"):
+        model = EncoderDecoderASR.from_hparams(args.asr, run_opts={"device": torch.device(args.device)}).requires_grad_(True).eval()
+    else: # conformer from nemo
+        model = nemo_asr.models.EncDecRNNTBPEModel.restore_from(args.asr).to(torch.device(args.device)).requires_grad_(True).eval()
+    if original:
+        model = configure_model(model)
+    return model
 
 
-def mcc_loss(x, reweight=False, dim=-1, class_num=32):
-    p = x.softmax(dim) # (1, L, D)
-    p = p.squeeze(0) # (L, D)
-    if reweight: # (1, L, D) * (L, 1) 
-        target_entropy_weight = softmax_entropy(x, dim=-1).detach().squeeze(0) # instance-wise entropy (1, L, D)
-        target_entropy_weight = 1 + torch.exp(-target_entropy_weight) # (1, L)
-        target_entropy_weight = x.shape[1] * target_entropy_weight / torch.sum(target_entropy_weight)
-        cov_matrix_t = p.mul(target_entropy_weight.view(-1, 1)).transpose(1, 0).mm(p)
-    else:
-        cov_matrix_t = p.transpose(1, 0).mm(p) # (D, L) * (L, D) -> (D, D)
-
-    cov_matrix_t = cov_matrix_t / torch.sum(cov_matrix_t, dim=1)
-    mcc_loss = (torch.sum(cov_matrix_t) - torch.trace(cov_matrix_t)) / class_num
-   
-    return mcc_loss
-
-
-def div_loss(x, non_blank=None, L_thd=64):
-    # maximize entropy of class prediction for every time-step in a utterance 
-    # x (1, L, D)
-    loss = 0
-    x = x.squeeze(0)
-    L = x.shape[0]
-
-    if non_blank is not None: 
-        cls_pred = x.mean(0)[1:] # (D, )
-    else:
-        cls_pred = x.mean(0) # (D, )
-
-    loss = -softmax_entropy(cls_pred, 0)
-
-    return loss
-
-
-def collect_params(model, bias_only=False, train_feature=False, train_all=False, train_LN=True):
+def collect_params(model, train_params, bias_only=False):
     """Collect the affine scale + shift parameters from batch norms.
 
     Walk the model's modules and collect all batch normalization parameters.
@@ -90,54 +69,85 @@ def collect_params(model, bias_only=False, train_feature=False, train_all=False,
         trainable = ['bias']
     else: 
         trainable = ['weight', 'bias']
-    
+
     for nm, m in model.named_modules():
-        if train_LN: 
-            if isinstance(m, nn.LayerNorm):
-                for np, p in m.named_parameters():
-                    if np in trainable:  
-                        p.requires_grad = True
-                        params.append(p)
-                        names.append(f"{nm}.{np}")
-        if train_feature:
+        if "all" in train_params:
+            for np, p in m.named_parameters():
+                p.requires_grad = True
+                params.append(p)
+                names.append(f"{nm}.{np}")
+            return params, names
+        if "feature" in train_params:
             if len(str(nm).split('.')) > 1:
                 if str(nm).split('.')[1] == 'feature_extractor' or str(nm).split('.')[1] == 'feature_projection':
                     for np, p in m.named_parameters():
                         p.requires_grad = True
                         params.append(p)
                         names.append(f"{nm}.{np}")
-        if train_all: 
-            for np, p in m.named_parameters():
-                p.requires_grad = True
-                params.append(p)
-                names.append(f"{nm}.{np}")    
+        if "LN" in train_params:
+            if isinstance(m, nn.LayerNorm):
+                for np, p in m.named_parameters():
+                    if np in trainable:  
+                        p.requires_grad = True
+                        params.append(p)
+                        names.append(f"{nm}.{np}")
     return params, names
 
 
-def consist_loss(model, input_values, outputs):
-    targets = outputs
-    # noisy outputs
-    model.wav2vec2.encoder.dropout.train()
-    noisy_outputs = model(input_values).logits
+def configure_model(model):
+    """Configure model for use with tent."""
+    model.requires_grad_(False)
+    return model
 
-    f = open('vocab.json')
-    vocab = json.load(f)
 
-    ctc_loss = nn.CTCLoss(blank=0, zero_infinity=False)
-    predicted_ids = torch.argmax(outputs, dim=-1)
-    transcription = processor.batch_decode(predicted_ids)[0]
-    target = []
-    for s in transcription:
-        if s == ' ':
-            s = '|'
-        target.append(vocab[s])
+def get_optimizer(params, opt_name='AdamW', lr=1e-4, beta=0.9, weight_decay=0., scheduler=None, step_size=1, gamma=0.7):
+    opt = getattr(torch.optim, opt_name)
+    if opt_name == 'Adam':       
+        optimizer = opt(params, lr=lr, betas=(beta, 0.999), weight_decay=weight_decay)
+    else: 
+        optimizer = opt(params, lr=lr, weight_decay=weight_decay)
+    
+    if scheduler is not None: 
+        return optimizer, eval(scheduler)(optimizer, step_size=step_size, gamma=gamma)
+    return optimizer, None
 
-    logp = noisy_outputs.log_softmax(1).transpose(1, 0) # L,N,D
-    input_len = logp.shape[0]
-    tgt_len = len(target)
-    loss = ctc_loss(logp, torch.tensor(target).int(), torch.tensor([input_len]), torch.tensor([tgt_len]))
-    model.eval()
-    return loss
+
+def get_augmentation(args):
+    if args.aug_type == "audio_aug":
+        weak_transforms = [
+            RandomApply([PolarityInversion()], p=0.5),
+            Noise(min_snr=0.001, max_snr=0.005),
+        ]
+        weak_augmentation = ComposeMany(transforms=weak_transforms, num_augmented_samples=1).to(torch.device(args.device))
+        strong_transforms = [
+            Noise(min_snr=0.01, max_snr=0.05),
+            RandomApply([PolarityInversion()], p=0.5),
+            RandomApply([Gain()], p=0.7),
+            RandomApply([Reverb(sample_rate=16000)], p=0.7),
+            # RandomApply([HighLowPass(sample_rate=16000)], p=0.7),
+            # RandomApply([PitchShift(n_samples=16000*5, sample_rate=16000)], p=0.7),
+        ]
+        strong_augmentation = ComposeMany(transforms=strong_transforms, num_augmented_samples=1).to(torch.device(args.device))
+    elif args.aug_type == "td_spec_aug":
+        weak_augmentation = TimeDomainSpecAugment(
+            perturb_prob=0, drop_freq_prob=1, drop_chunk_prob=1, speeds=[100],
+            drop_freq_count_low=1, drop_freq_count_high=3, drop_chunk_count_low=1, drop_chunk_count_high=3,
+            drop_chunk_length_low=500, drop_chunk_length_high=1000
+        ).to(torch.device(args.device))
+        strong_augmentation = TimeDomainSpecAugment(
+            perturb_prob=0, drop_freq_prob=1, drop_chunk_prob=1, speeds=[100],
+            drop_freq_count_low=7, drop_freq_count_high=10, drop_chunk_count_low=7, drop_chunk_count_high=10,
+            drop_chunk_length_low=500, drop_chunk_length_high=1000, drop_chunk_noise_factor=0
+        ).to(torch.device(args.device))
+    else: # specaugment
+        # TODO: implement specaugment
+        pass
+    return weak_augmentation, strong_augmentation
+
+
+# def apply_augmentation(augmentation_function, wavs):
+#     if isinstance(augmentation_function, TimeDomainSpecAugment):
+#         return augmentation_function()
 
 
 def copy_model_and_optimizer(model, optimizer, scheduler):
@@ -160,353 +170,603 @@ def load_model_and_optimizer(model, optimizer, scheduler, model_state, optimizer
         return model, optimizer, scheduler
     else: 
         return model, optimizer, None
-    
-
-def cal_grad(model):
-    total_norm = 0
-    parameters = [p for p in model.parameters() if p.grad is not None and p.requires_grad]
-    for p in parameters:
-        param_norm = p.grad.detach().data.norm(2)
-        total_norm += param_norm.item() ** 2
-    total_norm = total_norm ** 0.5
-    return total_norm
 
 
-def configure_model(model):
-    """Configure model for use with tent."""
-    model.requires_grad_(False)
-    return model
+def transcribe_batch(args, model, processor, wavs, lens):
+    with torch.no_grad():
+        if args.asr.startswith("facebook"):
+            inputs = processor(wavs, sampling_rate=16000, return_tensors="pt", padding="longest")
+            input_values = inputs.input_values.to(torch.device(args.device))
+            outputs = model(input_values).logits
+            predicted_ids = torch.argmax(outputs, dim=-1)
+            transcription = processor.batch_decode(predicted_ids)
+        elif args.asr.startswith("speechbrain"):
+            transcription, _ = model.transcribe_batch(wavs, wav_lens=torch.ones(len(wavs)).to(torch.device(args.device)))
+        else: # conformer from nemo
+            encoded_feature, encoded_len = model(input_signal=wavs, input_signal_length=lens)
+            best_hyp_texts, _ = model.decoding.rnnt_decoder_predictions_tensor(
+                encoder_output=encoded_feature, encoded_lengths=encoded_len, return_hypotheses=False
+            )
+            transcription = [best_hyp_text.upper() for best_hyp_text in best_hyp_texts]
+    return transcription
 
 
-def forward_and_adapt(x, model, optimizer, em_coef=0.9, reweight=False, temp=1., not_blank=True, scheduler=None, 
-                        div_coef=0, repeat_inference=True):
-    """Forward and adapt model on batch of data.
+def softmax_entropy(x, dim=-1):
+    return -(x.softmax(dim) * x.log_softmax(dim)).sum(dim)
 
-    Measure entropy of the model prediction, take gradients, and update params.
 
-    the index of <pad> in vocab is 0
-    """
-    # forward
-    outputs = model(x).logits
-    
+def mcc_loss(x, reweight=False, dim=-1, class_num=32):
+    p = x.softmax(dim) # (1, L, D)
+    p = p.squeeze(0) # (L, D)
+
+    if reweight: # (1, L, D) * (L, 1) 
+        target_entropy_weight = softmax_entropy(x, dim=-1).detach().squeeze(0) # instance-wise entropy (1, L, D)
+        target_entropy_weight = 1 + torch.exp(-target_entropy_weight) # (1, L)
+        target_entropy_weight = x.shape[1] * target_entropy_weight / torch.sum(target_entropy_weight)
+        cov_matrix_t = p.mul(target_entropy_weight.view(-1, 1)).transpose(1, 0).mm(p)
+    else:
+        cov_matrix_t = p.transpose(1, 0).mm(p) # (D, L) * (L, D) -> (D, D)
+
+    cov_matrix_t = cov_matrix_t / torch.sum(cov_matrix_t, dim=1)
+    mcc_loss = (torch.sum(cov_matrix_t) - torch.trace(cov_matrix_t)) / class_num
+    return mcc_loss
+
+
+def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens):
+    inputs = processor(wavs, sampling_rate=16000, return_tensors="pt", padding="longest")
+    input_values = inputs.input_values.to(torch.device(args.device))
+    outputs = model(input_values).logits
+
     predicted_ids = torch.argmax(outputs, dim=-1)
     non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
-    # adapt
+
     loss = 0
+    if args.method == "original":
+        if args.em_coef > 0:
+            if args.not_blank:
+                e_loss = softmax_entropy(outputs / args.temp)[non_blank].mean(0).mean()
+            else: 
+                e_loss = softmax_entropy(outputs / args.temp).mean(0).mean() 
+            loss += args.em_coef * e_loss
+    elif args.method == "em_uncertainty":
+        if args.em_coef > 0:
+            if args.not_blank:
+                frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)[non_blank]), p=1, dim=-1).detach()
+                # frame_weight = F.normalize(softmax_entropy(outputs)[non_blank], p=1, dim=-1).detach()
+                e_loss = torch.sum(frame_weight * softmax_entropy(outputs / args.temp)[non_blank], dim=-1).mean()
+            else:
+                frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)), dim=-1).detach()
+                # frame_weight = F.normalize(softmax_entropy(outputs), p=1, dim=-1).detach()
+                e_loss = torch.sum(frame_weight * softmax_entropy(outputs / args.temp), dim=-1).mean()
+            loss += args.em_coef * e_loss
+    elif args.method == "em_sparse":
+        if args.em_coef > 0:
+            if args.not_blank:
+                selected_frame = non_blank & torch.where(softmax_entropy(outputs, dim=-1) < args.entropy_threshold, 1, 0).bool()
+                e_loss = softmax_entropy(outputs / args.temp)[selected_frame].mean(0).mean()
+            else:
+                selected_frame = torch.where(softmax_entropy(outputs, dim=-1) < args.entropy_threshold, 1, 0).bool()
+                e_loss = softmax_entropy(outputs / args.temp)[selected_frame].mean(0).mean() 
+            loss += args.em_coef * e_loss
+    elif args.method == "cr":
+        weak_augmentation, strong_augmentation = get_augmentation(args)
 
-    if em_coef > 0:
-        if not_blank:
-            e_loss = softmax_entropy(outputs / temp)[non_blank].mean(0).mean()
-        else: 
-            e_loss = softmax_entropy(outputs / temp).mean(0).mean() 
-        
-        loss += e_loss * em_coef
+        ce_loss = nn.CrossEntropyLoss()
+        num_chunks = 4
+        for sub_wav in input_values.chunk(num_chunks, dim=-1):
+            weak_sub_wav = weak_augmentation(sub_wav, torch.ones(len(sub_wav)).to(torch.device(args.device)))
 
-    if 1 - em_coef > 0: 
-        c_loss = mcc_loss(outputs / temp, reweight)
-        loss += c_loss * (1 - em_coef)
+            with torch.no_grad():
+                if teacher_model:
+                    weak_outputs = teacher_model(weak_sub_wav).logits
+                else:
+                    weak_outputs = model(weak_sub_wav).logits
 
-    if div_coef > 0: 
-        d_loss = div_loss(outputs, not_blank) 
-        loss += d_loss * div_coef 
+            weak_probs = F.softmax(weak_outputs, dim=-1)
+            confidence, _ = torch.max(weak_probs, dim=-1, keepdim=True)
+            weak_max_idx = torch.argmax(weak_probs, dim=-1, keepdim=True)
+            weak_one_hots = torch.FloatTensor(weak_probs.shape).zero_().to(torch.device(args.device)).scatter(2, weak_max_idx, 1)
+            non_blank = torch.where(weak_max_idx != 0, 1, 0).bool()
 
-    loss.backward()
+            selected_frames = non_blank & torch.where(confidence > args.prob_threshold, 1, 0).bool()
+            selected_frames = selected_frames.expand_as(weak_probs)
+
+            strong_sub_wav = strong_augmentation(sub_wav, torch.ones(len(sub_wav)).to(torch.device(args.device)))
+            strong_outputs = model(strong_sub_wav).logits
+
+            for strong_output, weak_one_hot, selected_frame in zip(strong_outputs, weak_one_hots, selected_frames): # element-wise loss in batch
+                loss += ce_loss(
+                    strong_output * selected_frame,
+                    (weak_one_hot * selected_frame).detach()
+                )
+            del sub_wav, weak_sub_wav, weak_probs, confidence, weak_max_idx, non_blank, selected_frames, strong_sub_wav, strong_outputs
+
+    if 1 - args.em_coef > 0 and args.method in ["original", "em_uncertainty", "em_sparse"]:
+        c_loss = mcc_loss(outputs / args.temp, args.reweight)
+        loss += (1 - args.em_coef) * c_loss
+
+    optimizer.zero_grad()
+    if not isinstance(loss, int):
+        # loss.requires_grad_(True)
+        loss.backward()
     optimizer.step()
     if scheduler is not None: 
         scheduler.step()
-    model.zero_grad()
-
-    # inference again
-    if repeat_inference:
-        with torch.no_grad():
-            outputs = model(x).logits
-    return outputs
 
 
-def forward_and_adapt_em_uncertainty(x, model, optimizer, em_coef=0.9, reweight=False, temp=1., not_blank=True, scheduler=None, 
-                        div_coef=0, repeat_inference=True):
-    """Forward and adapt model on batch of data.
+def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens):
+    def forward_attn(args, model, greedy_searcher, wavs, gt_wavs=None):
+        log_probs_lst = []
 
-    Measure entropy of the model prediction, take gradients, and update params.
+        enc_states = model.encode_batch(wavs, wav_lens=torch.ones(len(wavs)).to(torch.device(args.device)))
+        # enc_lens = torch.round(torch.ones(enc_states.shape[1])).to(torch.device(args.device))
+        enc_lens = torch.tensor([enc_states.shape[1]]).to(torch.device(args.device))
 
-    the index of <pad> in vocab is 0
-    """
-    # forward
-    outputs = model(x).logits
-    
-    predicted_ids = torch.argmax(outputs, dim=-1)
-    non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
-    # adapt
-    loss = 0
- 
-    if em_coef > 0:
-        if not_blank:
-            frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)[non_blank]), dim=0).detach()
-            # frame_weight = F.normalize(softmax_entropy(outputs)[non_blank], dim=0).detach()
-            e_loss = torch.sum(frame_weight * softmax_entropy(outputs / temp)[non_blank], dim=0).mean()
+        device = enc_states.device
+        batch_size = enc_states.shape[0]
+        memory = greedy_searcher.reset_mem(batch_size, device=device)
+
+        inp_tokens = (enc_states.new_zeros(batch_size).fill_(greedy_searcher.bos_index).long())
+        max_decode_steps = int(enc_states.shape[1] * greedy_searcher.max_decode_ratio)
+
+        if gt_wavs != None:
+            with torch.no_grad():
+                gt_enc_states = model.encode_batch(gt_wavs, wav_lens=torch.ones(len(gt_wavs)).to(torch.device(args.device)))
+                # gt_enc_lens = torch.round(torch.ones(enc_states.shape[1])).to(torch.device(args.device))
+                gt_enc_lens = torch.tensor([gt_enc_states.shape[1]]).to(torch.device(args.device))
+
+                gt_memory = greedy_searcher.reset_mem(batch_size, device=device)
+                gt_inp_tokens = (gt_enc_states.new_zeros(batch_size).fill_(greedy_searcher.bos_index).long())
+            for _ in range(max_decode_steps):
+                with torch.no_grad():
+                    gt_log_probs, gt_memory, _ = greedy_searcher.forward_step(
+                        gt_inp_tokens, gt_memory, gt_enc_states, gt_enc_lens
+                    )
+                    gt_inp_tokens = gt_log_probs.argmax(dim=-1)
+
+                log_probs, memory, _ = greedy_searcher.forward_step(
+                    gt_inp_tokens, memory, enc_states, enc_lens
+                )
+                log_probs_lst.append(log_probs)
         else:
-            frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)), dim=0).detach()
-            # frame_weight = F.normalize(softmax_entropy(outputs), dim=0).detach()
-            e_loss = torch.sum(frame_weight * softmax_entropy(outputs / temp), dim=0).mean()
-        
-        loss += e_loss * em_coef
+            inp_tokens = (enc_states.new_zeros(batch_size).fill_(greedy_searcher.bos_index).long())
+            max_decode_steps = int(enc_states.shape[1] * greedy_searcher.max_decode_ratio)
 
-    if  1 - em_coef > 0:
-        c_loss = mcc_loss(outputs / temp, reweight)
-        loss += c_loss * (1 - em_coef)
+            for _ in range(max_decode_steps):
+                log_probs, memory, _ = greedy_searcher.forward_step(
+                    inp_tokens, memory, enc_states, enc_lens
+                )
+                log_probs_lst.append(log_probs)
+                inp_tokens = log_probs.argmax(dim=-1)
+        return log_probs_lst
 
-    if div_coef > 0: 
-        d_loss = div_loss(outputs, not_blank) 
-        loss += d_loss * div_coef
+    greedy_searcher = S2SRNNGreedySearcher(
+        model.mods.decoder.emb,
+        model.mods.decoder.dec,
+        model.mods.decoder.fc,
+        **{
+            "bos_index": model.mods.decoder.bos_index,
+            "eos_index": model.mods.decoder.eos_index,
+            "min_decode_ratio": model.mods.decoder.min_decode_ratio,
+            "max_decode_ratio": model.mods.decoder.max_decode_ratio,
+        },
+    ).to(torch.device(args.device)).train()
 
-    loss.backward()
-    optimizer.step()
-    if scheduler is not None: 
-        scheduler.step()
-    model.zero_grad()
-
-    # inference again
-    if repeat_inference:
-        with torch.no_grad():
-            outputs = model(x).logits
-    return outputs
-
-
-def forward_and_adapt_em_sparse(x, model, optimizer, em_coef=0.9, reweight=False, temp=1., not_blank=True, scheduler=None, 
-                        div_coef=0, repeat_inference=True):
-    """Forward and adapt model on batch of data.
-
-    Measure entropy of the model prediction, take gradients, and update params.
-
-    the index of <pad> in vocab is 0
-    """
-    # forward
-    outputs = model(x).logits
-    
-    predicted_ids = torch.argmax(outputs, dim=-1)
-    non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
-    # adapt
     loss = 0
+    if args.method in ["original", "em_uncertainty", "em_sparse"]:
+        log_probs_lst = forward_attn(args, model, greedy_searcher, wavs)
+        log_prob_tensor = torch.stack(log_probs_lst, dim=1)
+        if args.em_coef > 0:
+            if args.method == "original":
+                e_loss = softmax_entropy(log_prob_tensor / args.temp, dim=-1).mean(0).mean()
+            elif args.method == "em_uncertainty":
+                frame_weight = F.normalize(torch.reciprocal(softmax_entropy(log_prob_tensor)), p=1, dim=-1).detach()
+                e_loss = torch.sum(frame_weight * softmax_entropy(log_prob_tensor / args.temp), dim=-1).mean()
+            elif args.method == "em_sparse":
+                selected_frame = torch.where(softmax_entropy(log_prob_tensor, dim=-1) < args.entropy_threshold, 1, 0).bool()
+                e_loss = softmax_entropy(log_prob_tensor / args.temp)[selected_frame].mean(0).mean()
+            loss += args.em_coef * e_loss
 
-    if em_coef > 0:
-        if not_blank:
-            uncertainty_upper_bound = 0.05
-            # entropy_per_frame = softmax_entropy(outputs, dim=-1)[non_blank]
-            # if len(entropy_per_frame) == 0:
-            #     return outputs
-            # uncertainty_upper_bound = torch.quantile(entropy_per_frame, 0.5)
-            selected_frame = non_blank & torch.where(softmax_entropy(outputs, dim=-1) < uncertainty_upper_bound, 1, 0).bool()
-            e_loss = softmax_entropy(outputs / temp)[selected_frame].mean(0).mean()
-        else:
-            uncertainty_upper_bound = 0.05
-            # entropy_per_frame = softmax_entropy(outputs, dim=-1)
-            # uncertainty_upper_bound = torch.quantile(entropy_per_frame, 0.5)
-            selected_frame = torch.where(softmax_entropy(outputs, dim=-1) < uncertainty_upper_bound, 1, 0).bool()
-            e_loss = softmax_entropy(outputs / temp)[selected_frame].mean(0).mean() 
-        
-        loss += e_loss * em_coef
+        if 1 - args.em_coef > 0:
+            c_loss = mcc_loss(log_prob_tensor / args.temp, reweight=args.reweight, class_num=1000)
+            loss += (1 - args.em_coef) * c_loss
+    if args.method == "cr":
+        weak_augmentation, strong_augmentation = get_augmentation(args)
 
-    if 1 - em_coef > 0: 
-        c_loss = mcc_loss(outputs / temp, reweight)
-        loss += c_loss * (1 - em_coef)
-
-    if div_coef > 0: 
-        d_loss = div_loss(outputs, not_blank) 
-        loss += d_loss * div_coef 
-
-    loss.backward()
-    optimizer.step()
-    if scheduler is not None: 
-        scheduler.step()
-    model.zero_grad()
-
-    # inference again
-    if repeat_inference:
+        ce_loss = nn.CrossEntropyLoss()
+        weak_wavs = weak_augmentation(wavs, torch.ones(len(wavs)).to(torch.device(args.device)))
         with torch.no_grad():
-            outputs = model(x).logits
-    return outputs
-
-
-def forward_and_adapt_cr(x, model, optimizer, em_coef=0.9, reweight=False, temp=1., not_blank=True, scheduler=None, 
-                        div_coef=0, repeat_inference=True, teacher_model=None):
-    """Forward and adapt model on batch of data.
-
-    Measure entropy of the model prediction, take gradients, and update params.
-
-    the index of <pad> in vocab is 0
-    """
-    # kl_div_loss = nn.KLDivLoss(reduction='batchmean')
-    ce_loss = nn.CrossEntropyLoss()
-    loss = 0
-
-    # from art.attacks.evasion import ImperceptibleASRPyTorch
-    # from art.estimators.speech_recognition import PyTorchDeepSpeech
-    # import numpy as np
-    # attack = ImperceptibleASRPyTorch(PyTorchDeepSpeech(pretrained_model="librispeech"))
-    # attack.generate(x.numpy(), np.array(["Hello"]))
-
-    # audio augmentation using fixmatch
-    num_chunks = 2
-    # weak_transforms = [
-    #     RandomApply([PolarityInversion()], p=0.5),
-    #     Noise(min_snr=0.001, max_snr=0.005),
-    #     # RandomApply([Noise(min_snr=0.001, max_snr=0.005)], p=0.2),
-    #     # RandomApply([PitchShift(n_samples=16000*5, sample_rate=16000)], p=0.2),
-    #     # RandomApply([Reverb(sample_rate=16000)], p=0.2),
-    # ]
-    # weak_augmentation = ComposeMany(transforms=weak_transforms, num_augmented_samples=1)
-
-    weak_augmentation = TimeDomainSpecAugment(
-        perturb_prob=0.5, drop_freq_prob=0.5, drop_chunk_prob=0.5, speeds=[100],
-        drop_freq_count_low=0, drop_freq_count_high=3, drop_chunk_count_low=0, drop_chunk_count_high=3
-    )
-    strong_augmentation = TimeDomainSpecAugment(
-        perturb_prob=1, drop_freq_prob=1, drop_chunk_prob=1, speeds=[100],
-        drop_freq_count_low=3, drop_freq_count_high=5, drop_chunk_count_low=3, drop_chunk_count_high=5, drop_chunk_noise_factor=0
-    )
-
-    # strong_transforms = [
-    #     RandomApply([PolarityInversion()], p=0.5),
-    #     # RandomApply([Noise(min_snr=0.01, max_snr=0.05)], p=0.7),
-    #     Noise(min_snr=0.01, max_snr=0.05),
-    #     RandomApply([Gain()], p=0.7),
-    #     # RandomApply([HighLowPass(sample_rate=16000)], p=0.7),
-    #     # RandomApply([PitchShift(n_samples=16000*5, sample_rate=16000)], p=0.7),
-    #     RandomApply([Reverb(sample_rate=16000)], p=0.7),
-    # ]
-    # strong_augmentation = ComposeMany(transforms=strong_transforms, num_augmented_samples=1)
-
-    for sub_x in x.chunk(num_chunks, dim=1):
-        weak_x = weak_augmentation(sub_x.detach().cpu(), torch.ones(1))
-
-        if teacher_model:
-            weak_outputs = teacher_model(weak_x.to('cuda')).logits
-            # with torch.no_grad():
-            #     outputs = teacher_model.wav2vec2(weak_x.to('cuda'))
-            #     hidden_states = outputs[0]
-            #     hidden_states = model.dropout(hidden_states)
-
-            # if len(memory_queue.queue) < n_neighbors:
-            #     weak_probs = F.softmax(weak_outputs, dim=-1)
-            # else:
-            #     pseudo_prob = []
-            #     for hidden_state in hidden_states.squeeze(0):
-            #         candidates = []
-            #         for previous_hidden_state, prob in memory_queue.queue:
-            #             candidates.append((torch.norm(hidden_state - previous_hidden_state), prob))
-            #         candidates.sort(key=lambda x: x[0])
-                    
-            #         weak_prob_for_one = torch.mean(torch.stack([x[1] for x in candidates[:n_neighbors]]), dim=0)
-            #         pseudo_prob.append(weak_prob_for_one)
-            #     weak_probs = torch.stack(pseudo_prob).unsqueeze(0)
-
-            # for hidden_state, logit in zip(hidden_states.squeeze(0), weak_outputs.squeeze(0)):
-            #     if memory_queue.full():
-            #         memory_queue.get()
-            #     memory_queue.put((hidden_state, F.softmax(logit, -1)))
-        else:
-            weak_outputs = model(weak_x.to('cuda')).logits
-            # with torch.no_grad():
-            #     outputs = model.wav2vec2(weak_x.to('cuda'))
-            #     hidden_states = outputs[0]
-            #     hidden_states = model.dropout(hidden_states)
+            if teacher_model:
+                teacher_greedy_searcher = S2SRNNGreedySearcher(
+                    teacher_model.mods.decoder.emb,
+                    teacher_model.mods.decoder.dec,
+                    teacher_model.mods.decoder.fc,
+                    **{
+                        "bos_index": teacher_model.mods.decoder.bos_index,
+                        "eos_index": teacher_model.mods.decoder.eos_index,
+                        "min_decode_ratio": teacher_model.mods.decoder.min_decode_ratio,
+                        "max_decode_ratio": teacher_model.mods.decoder.max_decode_ratio,
+                    },
+                ).to(torch.device(args.device)).train()
+                weak_outputs = torch.stack(forward_attn(args, teacher_model, teacher_greedy_searcher, weak_wavs), dim=1)
+            else:
+                weak_outputs = torch.stack(forward_attn(args, model, greedy_searcher, weak_wavs), dim=1)
 
         weak_probs = F.softmax(weak_outputs, dim=-1)
-        weak_max_idx = torch.argmax(weak_probs, dim=-1, keepdim=True)
-        weak_one_hots = torch.FloatTensor(weak_probs.shape).zero_().to('cuda').scatter(2, weak_max_idx, 1)
-
-        # ------- start adversarial attack -------
-
-        # model.eval()
-
-        # n_steps = 10
-        # noise = torch.zeros_like(weak_x).requires_grad_()
-        # for _ in range(n_steps):
-        #     adversarial_outputs = model(weak_x.cuda() + noise.cuda()).logits
-        #     adv_loss = - ce_loss(adversarial_outputs, weak_one_hots.cuda()) + (1e-2 * torch.max(torch.tensor([0]), torch.norm(noise, p=2) - 0.4)).cuda()
-        #     # adv_loss = - ce_loss(adversarial_outputs, weak_one_hots.cuda())
-        #     adv_loss.backward()
-        #     noise = noise + 5e-3 * noise.grad.data.sign()
-        #     noise = noise.detach().requires_grad_()
-        # torchaudio.save("benign_example.wav", weak_x, 16000)
-        # torchaudio.save("adversarial_example.wav", weak_x + noise, 16000)
-
-        # adv_outputs = model(weak_x.cuda() + noise.cuda()).logits
-        # adv_probs = F.softmax(adv_outputs, dim=-1)
-        # adv_max_idx = torch.argmax(adv_probs, dim=-1, keepdim=True)
-
-        # print(f"weak_max_idx : {weak_max_idx.flatten()}")
-        # print(f"adv_max_idx : {adv_max_idx.flatten()}")
-        # print(f"(weak_max_idx == adv_max_idx).float().mean() : {(weak_max_idx == adv_max_idx).float().mean()}")
-
-        # model.train()
-
-        # ------- end adversarial attack -------
-
-        non_blank = torch.where(weak_max_idx != 0, 1, 0).bool()
         confidence, _ = torch.max(weak_probs, dim=-1, keepdim=True)
+        weak_max_idx = torch.argmax(weak_probs, dim=-1, keepdim=True)
+        weak_one_hots = torch.FloatTensor(weak_probs.shape).zero_().to(torch.device(args.device)).scatter(2, weak_max_idx, 1)
+        non_blank = torch.where(weak_max_idx != 0, 1, 0).bool()
 
-        th = 0.9
-        # selected_frames = non_blank & torch.where(confidence > th, 1, 0).bool()
-        selected_frames = non_blank & torch.where(confidence > th, 1, 0).bool()
+        selected_frames = non_blank & torch.where(confidence > args.prob_threshold, 1, 0).bool()
         selected_frames = selected_frames.expand_as(weak_probs)
 
-        # TODO: non_blank / th / augmentation
-        # selected_frame = non_blank & torch.where(softmax_entropy(outputs, dim=-1) < th, 1, 0).bool()
-
-        strong_x = strong_augmentation(sub_x.detach().cpu(), torch.ones(1))
-        strong_outputs = model(strong_x.to('cuda')).logits
-
-        # loss += ce_loss(strong_outputs[selected_frame], weak_probs[selected_frame].detach())
-        # for i, weak_prob in enumerate(weak_probs):
-        #     for strong_output in strong_outputs:
-        #         print(strong_output[selected_frame[i]].shape)
-        #         print(weak_prob[selected_frame[i]].detach().shape)
-        #         loss += ce_loss(
-        #             strong_output[selected_frame[i]],
-        #             weak_prob[selected_frame[i]].detach()
-        #         )
-
-        for strong_output, weak_one_hot, selected_frame in zip(strong_outputs, weak_one_hots, selected_frames):
+        strong_wavs = strong_augmentation(wavs, torch.ones(len(wavs)).to(torch.device(args.device)))
+        strong_outputs = torch.stack(forward_attn(args, model, greedy_searcher, strong_wavs, gt_wavs=weak_wavs), dim=1)
+        for strong_output, weak_one_hot, selected_frame in zip(strong_outputs, weak_one_hots, selected_frames): # element-wise loss in batch
             loss += ce_loss(
                 strong_output * selected_frame,
                 (weak_one_hot * selected_frame).detach()
             )
-
-    # outputs = model(x).logits
-    # predicted_ids = torch.argmax(outputs, dim=-1)
-    # non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
-    # e_loss = softmax_entropy(outputs / temp)[non_blank].mean(0).mean()
-    # loss += e_loss
+        
+        del weak_wavs, weak_probs, weak_one_hots, confidence, non_blank, strong_wavs
 
     optimizer.zero_grad()
-    loss.backward()
+    if not isinstance(loss, int):
+        # loss.requires_grad_(True)
+        loss.backward()
     optimizer.step()
-    if scheduler is not None:
+    if scheduler is not None: 
         scheduler.step()
 
-    momentum = 0.9
-    if teacher_model:
-        for teacher_param, student_param in zip(teacher_model.parameters(), model.parameters()):
-            with torch.no_grad():
-                teacher_param.copy_(momentum * teacher_param + (1 - momentum) * student_param)
 
-    # inference again
-    if repeat_inference:
+def forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens):
+    def forward_trans(args, model, wavs, lens, gt_wavs=None):
+        log_probs_lst = []
+
+        if gt_wavs == None:
+            encoder_output, encoded_lengths = model(input_signal=wavs, input_signal_length=lens)
+            encoder_output = encoder_output.transpose(1, 2)
+            logitlen = encoded_lengths
+
+            inseq = encoder_output  # [B, T, D]
+            x, out_len, device = inseq, logitlen, inseq.device
+            batchsize = x.shape[0]
+            hypotheses = [rnnt_utils.Hypothesis(score=0.0, y_sequence=[], timestep=[], dec_state=None) for _ in range(batchsize)]
+            hidden = None
+
+            if model.decoding.decoding.preserve_alignments:
+                for hyp in hypotheses:
+                    hyp.alignments = [[]]
+
+            last_label = torch.full([batchsize, 1], fill_value=model.decoding.decoding._blank_index, dtype=torch.long, device=device)
+            blank_mask = torch.full([batchsize], fill_value=0, dtype=torch.bool, device=device)
+
+            max_out_len = out_len.max()
+            for time_idx in range(max_out_len):
+                f = x.narrow(dim=1, start=time_idx, length=1)  # [B, 1, D]
+
+                not_blank = True
+                symbols_added = 0
+
+                blank_mask.mul_(False)
+                blank_mask = time_idx >= out_len
+
+                while not_blank and (model.decoding.decoding.max_symbols is None or symbols_added < model.decoding.decoding.max_symbols):
+                    if time_idx == 0 and symbols_added == 0 and hidden is None:
+                        in_label = model.decoding.decoding._SOS
+                    else:
+                        in_label = last_label
+                    if isinstance(in_label, torch.Tensor) and in_label.dtype != torch.long:
+                        in_label = in_label.long()
+                        g, hidden_prime = model.decoding.decoding.decoder.predict(None, hidden, False, batchsize)
+                    else:
+                        if in_label == model.decoding.decoding._SOS:
+                            g, hidden_prime = model.decoding.decoding.decoder.predict(None, hidden, False, batchsize)
+                        else:
+                            in_label = label_collate([[in_label.cpu()]])
+                            g, hidden_prime = model.decoding.decoding.decoder.predict(in_label, hidden, False, batchsize)
+
+                    logp = model.decoding.decoding.joint.joint(f, g)
+                    if not logp.is_cuda:
+                        logp = logp.log_softmax(dim=len(logp.shape) - 1)
+                    logp = logp[:, 0, 0, :]
+                    # return log_probs_lst
+                    log_probs_lst.append(logp)
+
+                    if logp.dtype != torch.float32:
+                        logp = logp.float()
+
+                    # Get index k, of max prob for batch
+                    v, k = logp.max(1)
+                    del g
+
+                    # Update blank mask with current predicted blanks
+                    # This is accumulating blanks over all time steps T and all target steps min(max_symbols, U)
+                    k_is_blank = k == model.decoding.decoding._blank_index
+
+                    blank_mask.bitwise_or_(k_is_blank)
+                    del k_is_blank
+
+                    if model.decoding.decoding.preserve_alignments:
+                        # Insert logprobs into last timestep per sample
+                        logp_vals = logp.to('cpu')
+                        logp_ids = logp_vals.max(1)[1]
+                        for batch_idx in range(batchsize):
+                            if time_idx < out_len[batch_idx]:
+                                hypotheses[batch_idx].alignments[-1].append(
+                                    (logp_vals[batch_idx], logp_ids[batch_idx])
+                                )
+                        del logp_vals
+
+                    if blank_mask.all():
+                        not_blank = False
+                        if model.decoding.decoding.preserve_alignments:
+                            for batch_idx in range(batchsize):
+                                if len(hypotheses[batch_idx].alignments[-1]) > 0:
+                                    hypotheses[batch_idx].alignments.append([])  # blank buffer for next timestep
+                    else:
+                        blank_indices = (blank_mask == 1).nonzero(as_tuple=False)
+                        if hidden is not None:
+                            hidden_prime = model.decoding.decoding.decoder.batch_copy_states(hidden_prime, hidden, blank_indices)
+                        elif len(blank_indices) > 0 and hidden is None:
+                            hidden_prime = model.decoding.decoding.decoder.batch_copy_states(hidden_prime, None, blank_indices, value=0.0)
+                        k[blank_indices] = last_label[blank_indices, 0]
+                        last_label = k.clone().view(-1, 1)
+                        hidden = hidden_prime
+                        for kidx, ki in enumerate(k):
+                            if blank_mask[kidx] == 0:
+                                hypotheses[kidx].y_sequence.append(ki)
+                                hypotheses[kidx].timestep.append(time_idx)
+                                hypotheses[kidx].score += float(v[kidx])
+
+                        symbols_added += 1
+        else:
+            encoder_output, encoded_lengths = model(input_signal=wavs, input_signal_length=lens)
+            encoder_output = encoder_output.transpose(1, 2)
+            logitlen = encoded_lengths
+
+            gt_encoder_output, gt_encoded_lengths = model(input_signal=gt_wavs, input_signal_length=lens)
+            gt_encoder_output = gt_encoder_output.transpose(1, 2)
+
+            inseq = encoder_output  # [B, T, D]
+            x, out_len, device = inseq, logitlen, inseq.device
+            batchsize = x.shape[0]
+            hypotheses = [rnnt_utils.Hypothesis(score=0.0, y_sequence=[], timestep=[], dec_state=None) for _ in range(batchsize)]
+            hidden = None
+
+            if model.decoding.decoding.preserve_alignments:
+                for hyp in hypotheses:
+                    hyp.alignments = [[]]
+
+            last_label = torch.full([batchsize, 1], fill_value=model.decoding.decoding._blank_index, dtype=torch.long, device=device)
+            blank_mask = torch.full([batchsize], fill_value=0, dtype=torch.bool, device=device)
+
+            gt_x = gt_encoder_output
+            gt_hypotheses = [rnnt_utils.Hypothesis(score=0.0, y_sequence=[], timestep=[], dec_state=None) for _ in range(batchsize)]
+            gt_hidden = None
+            gt_last_label = torch.full([batchsize, 1], fill_value=model.decoding.decoding._blank_index, dtype=torch.long, device=device)
+            gt_blank_mask = torch.full([batchsize], fill_value=0, dtype=torch.bool, device=device)
+
+            max_out_len = out_len.max()
+            for time_idx in range(max_out_len):
+                gt_f = gt_x.narrow(dim=1, start=time_idx, length=1)  # [B, 1, D]
+
+                not_blank = True
+                gt_symbols_added = 0
+
+                gt_blank_mask.mul_(False)
+                gt_blank_mask = time_idx >= out_len
+
+                while not_blank and (model.decoding.decoding.max_symbols is None or gt_symbols_added < model.decoding.decoding.max_symbols):
+                    if time_idx == 0 and gt_symbols_added == 0 and gt_hidden is None:
+                        in_label = model.decoding.decoding._SOS
+                    else:
+                        in_label = gt_last_label
+                    if isinstance(in_label, torch.Tensor) and in_label.dtype != torch.long:
+                        in_label = in_label.long()
+                        gt_g, gt_hidden_prime = model.decoding.decoding.decoder.predict(None, gt_hidden, False, batchsize)
+                    else:
+                        if in_label == model.decoding.decoding._SOS:
+                            gt_g, gt_hidden_prime = model.decoding.decoding.decoder.predict(None, gt_hidden, False, batchsize)
+                        else:
+                            in_label = label_collate([[in_label.cpu()]])
+                            gt_g, gt_hidden_prime = model.decoding.decoding.decoder.predict(in_label, gt_hidden, False, batchsize)
+
+                    gt_logp = model.decoding.decoding.joint.joint(gt_f, gt_g)
+                    if not gt_logp.is_cuda:
+                        gt_logp = logp.log_softmax(dim=len(gt_logp.shape) - 1)
+                    gt_logp = gt_logp[:, 0, 0, :]
+
+                    if gt_logp.dtype != torch.float32:
+                        gt_logp = gt_logp.float()
+
+                    v, k = gt_logp.max(1)
+
+                    k_is_blank = k == model.decoding.decoding._blank_index
+
+                    gt_blank_mask.bitwise_or_(k_is_blank)
+
+                    if model.decoding.decoding.preserve_alignments:
+                        gt_logp_vals = gt_logp.to('cpu')
+                        gt_logp_ids = gt_logp_vals.max(1)[1]
+                        for batch_idx in range(batchsize):
+                            if time_idx < out_len[batch_idx]:
+                                gt_hypotheses[batch_idx].alignments[-1].append(
+                                    (gt_logp_vals[batch_idx], gt_logp_ids[batch_idx])
+                                )
+
+                    if gt_blank_mask.all():
+                        not_blank = False
+                        if model.decoding.decoding.preserve_alignments:
+                            for batch_idx in range(batchsize):
+                                if len(gt_hypotheses[batch_idx].alignments[-1]) > 0:
+                                    gt_hypotheses[batch_idx].alignments.append([])  # blank buffer for next timestep
+                    else:
+                        blank_indices = (gt_blank_mask == 1).nonzero(as_tuple=False)
+                        if gt_hidden is not None:
+                            gt_hidden_prime = model.decoding.decoding.decoder.batch_copy_states(gt_hidden_prime, gt_hidden, blank_indices)
+                        elif len(blank_indices) > 0 and gt_hidden is None:
+                            gt_hidden_prime = model.decoding.decoding.decoder.batch_copy_states(gt_hidden_prime, None, blank_indices, value=0.0)
+                        k[blank_indices] = gt_last_label[blank_indices, 0]
+                        gt_last_label = k.clone().view(-1, 1)
+                        gt_hidden = gt_hidden_prime
+                        for kidx, ki in enumerate(k):
+                            if gt_blank_mask[kidx] == 0:
+                                gt_hypotheses[kidx].y_sequence.append(ki)
+                                gt_hypotheses[kidx].timestep.append(time_idx)
+                                gt_hypotheses[kidx].score += float(v[kidx])
+                        gt_symbols_added += 1
+
+                f = x.narrow(dim=1, start=time_idx, length=1)  # [B, 1, D]
+
+                not_blank = True
+                symbols_added = 0
+
+                blank_mask.mul_(False)
+                blank_mask = time_idx >= out_len
+
+                while not_blank and (model.decoding.decoding.max_symbols is None or symbols_added < model.decoding.decoding.max_symbols):
+                    if time_idx == 0 and symbols_added == 0 and hidden is None:
+                        in_label = model.decoding.decoding._SOS
+                    else:
+                        in_label = gt_last_label
+                    if isinstance(in_label, torch.Tensor) and in_label.dtype != torch.long:
+                        in_label = in_label.long()
+                        g, hidden_prime = model.decoding.decoding.decoder.predict(None, gt_hidden, False, batchsize)
+                    else:
+                        if in_label == model.decoding.decoding._SOS:
+                            g, hidden_prime = model.decoding.decoding.decoder.predict(None, gt_hidden, False, batchsize)
+                        else:
+                            in_label = label_collate([[in_label.cpu()]])
+                            g, hidden_prime = model.decoding.decoding.decoder.predict(in_label, hidden, False, batchsize)
+
+                    logp = model.decoding.decoding.joint.joint(f, g)
+                    if not logp.is_cuda:
+                        logp = logp.log_softmax(dim=len(logp.shape) - 1)
+                    logp = logp[:, 0, 0, :]
+                    log_probs_lst.append(logp)
+
+                    if logp.dtype != torch.float32:
+                        logp = logp.float()
+
+                    v, k = logp.max(1)
+
+                    k_is_blank = k == model.decoding.decoding._blank_index
+
+                    blank_mask.bitwise_or_(k_is_blank)
+
+                    if model.decoding.decoding.preserve_alignments:
+                        logp_vals = logp.to('cpu')
+                        logp_ids = logp_vals.max(1)[1]
+                        for batch_idx in range(batchsize):
+                            if time_idx < out_len[batch_idx]:
+                                hypotheses[batch_idx].alignments[-1].append(
+                                    (logp_vals[batch_idx], logp_ids[batch_idx])
+                                )
+
+                    if blank_mask.all():
+                        not_blank = False
+                        if model.decoding.decoding.preserve_alignments:
+                            for batch_idx in range(batchsize):
+                                if len(hypotheses[batch_idx].alignments[-1]) > 0:
+                                    hypotheses[batch_idx].alignments.append([])  # blank buffer for next timestep
+                    else:
+                        blank_indices = (blank_mask == 1).nonzero(as_tuple=False)
+                        if hidden is not None:
+                            hidden_prime = model.decoding.decoding.decoder.batch_copy_states(hidden_prime, hidden, blank_indices)
+                        elif len(blank_indices) > 0 and hidden is None:
+                            hidden_prime = model.decoding.decoding.decoder.batch_copy_states(hidden_prime, None, blank_indices, value=0.0)
+                        k[blank_indices] = last_label[blank_indices, 0]
+                        last_label = k.clone().view(-1, 1)
+                        hidden = hidden_prime
+                        for kidx, ki in enumerate(k):
+                            if blank_mask[kidx] == 0:
+                                hypotheses[kidx].y_sequence.append(ki)
+                                hypotheses[kidx].timestep.append(time_idx)
+                                hypotheses[kidx].score += float(v[kidx])
+                        symbols_added += 1
+
+        return log_probs_lst
+
+    loss = 0
+    if args.method in ["original", "em_uncertainty", "em_sparse"]:
+        log_probs_lst = forward_trans(args, model, wavs, lens, gt_wavs=None)
+        log_prob_tensor = torch.stack(log_probs_lst, dim=1)
+        if args.em_coef > 0:
+            if args.method == "original":
+                e_loss = softmax_entropy(log_prob_tensor / args.temp, dim=-1).mean(0).mean()
+            elif args.method == "em_uncertainty":
+                frame_weight = F.normalize(torch.reciprocal(softmax_entropy(log_prob_tensor)), p=1, dim=-1).detach()
+                e_loss = torch.sum(frame_weight * softmax_entropy(log_prob_tensor / args.temp), dim=-1).mean()
+            elif args.method == "em_sparse":
+                selected_frame = torch.where(softmax_entropy(log_prob_tensor, dim=-1) < args.entropy_threshold, 1, 0).bool()
+                e_loss = softmax_entropy(log_prob_tensor / args.temp)[selected_frame].mean(0).mean()
+            loss += args.em_coef * e_loss
+
+        if 1 - args.em_coef > 0:
+            c_loss = mcc_loss(log_prob_tensor / args.temp, reweight=args.reweight, class_num=1000)
+            loss += (1 - args.em_coef) * c_loss
+    if args.method == "cr":
+        weak_augmentation, strong_augmentation = get_augmentation(args)
+
+        ce_loss = nn.CrossEntropyLoss()
+        weak_wavs = weak_augmentation(wavs, torch.ones(len(wavs)).to(torch.device(args.device)))
         with torch.no_grad():
-            outputs = model(x).logits
-    return outputs
+            if teacher_model:
+                weak_outputs = torch.stack(forward_trans(args, teacher_model, weak_wavs, lens), dim=1)
+            else:
+                weak_outputs = torch.stack(forward_trans(args, model, weak_wavs, lens), dim=1)
 
-@hydra.main(version_base=None, config_path="../conf", config_name="config")
+        weak_probs = F.softmax(weak_outputs, dim=-1)
+        confidence, _ = torch.max(weak_probs, dim=-1, keepdim=True)
+
+        weak_max_idx = torch.argmax(weak_probs, dim=-1, keepdim=True)
+        weak_one_hots = torch.FloatTensor(weak_probs.shape).zero_().to(torch.device(args.device)).scatter(2, weak_max_idx, 1)
+        non_blank = torch.where(weak_max_idx != model.decoding.decoding._blank_index, 1, 0).bool()
+
+        selected_frames = non_blank & torch.where(confidence > args.prob_threshold, 1, 0).bool()
+        selected_frames = selected_frames.expand_as(weak_probs)
+
+        del weak_wavs, weak_outputs, weak_probs, confidence, weak_max_idx, non_blank
+
+        strong_wavs = strong_augmentation(wavs, torch.ones(len(wavs)).to(torch.device(args.device)))
+        # strong_outputs = torch.stack(forward_trans(args, model, strong_wavs, lens, gt_wavs=weak_wavs), dim=1)
+        strong_outputs = torch.stack(forward_trans(args, model, strong_wavs, lens), dim=1)
+
+        if strong_outputs.shape[1] > weak_one_hots.shape[1]:
+            strong_outputs = strong_outputs[:, :weak_one_hots.shape[1], :]
+        else:
+            weak_one_hots = weak_one_hots[:, :strong_outputs.shape[1], :]
+            selected_frames = selected_frames[:, :strong_outputs.shape[1], :]
+
+        for strong_output, weak_one_hot, selected_frame in zip(strong_outputs, weak_one_hots, selected_frames): # element-wise loss in batch
+            loss += ce_loss(
+                strong_output * selected_frame,
+                (weak_one_hot * selected_frame).detach()
+            )
+        del strong_wavs, strong_outputs
+
+    optimizer.zero_grad()
+    if not isinstance(loss, int):
+        # loss.requires_grad_(True)
+        loss.backward()
+    optimizer.step()
+    if scheduler is not None: 
+        scheduler.step()
+
+
+
+@hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(args):
-    asr = args.asr
     dataset_name = args.dataset_name
     dataset_dir = args.dataset_dir
     split = args.split
     batch_size = args.batch_size
     extra_noise = args.extra_noise
+    sample_rate = args.sample_rate
 
-    opt = args.opt
+    optimizer = args.optimizer
     lr = args.lr
     scheduler = args.scheduler
     steps = args.steps
@@ -514,299 +774,107 @@ def main(args):
     bias_only = args.bias_only
     episodic = args.episodic
 
-    method = args.method
     teacher_student = args.teacher_student
-    memory_queue = args.memory_queue
+    momentum = args.momentum
 
-    non_blank = args.non_blank
-    reweight = args.reweight
-    div_coef = args.div_coef
-    em_coef = args.em_coef
-    temp =  args.temp
+    stochastic_restoration = args.stochastic_restoration
+    restore_prob = args.restore_prob
 
-    log_dir = args.log_dir
-    exp_name = f"exp_{datetime.now().strftime('%m_%d_%Y_%H_%M_%S')}"
+    # TODO: implement memory queue
+    # use_memory_queue = args.use_memory_queue
+    # queue_size = args.queue_size
+    # n_neighbors = args.n_neighbors
+    # if use_memory_queue:
+    #     memory_queue = Queue(maxsize=queue_size)
+
+    if not os.path.exists(args.log_dir):
+        os.makedirs(args.log_dir)
+    logger = get_logger(args)
+
+    with open(os.path.join(args.log_dir, "config.yaml"), 'w') as f:
+        OmegaConf.save(args, f)
+    logger.info(OmegaConf.to_yaml(args))
 
     dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise)
-    transcriptions_1 = []
-    transcriptions_3 = []
-    transcriptions_5 = []
-    transcriptions_10 = []
-    transcriptions_20 = []
-    transcriptions_40 = []
-    gt_texts = []
-    ori_transcriptions = []
-    durations = []
-    werrs = []
+    gt_texts, ori_transcriptions, transcriptions_1, transcriptions_3, transcriptions_5, transcriptions_10, transcriptions_20, transcriptions_40 = [], [], [], [], [], [], [], []
 
-    print(vars(args))
+    original_model = get_model(args, original=True)
+    model = get_model(args, original=False)
+    params, _ = collect_params(model, train_params, bias_only)
+    optimizer, scheduler = get_optimizer(params, optimizer, lr, scheduler=scheduler)
 
-    # load model and tokenizer
-    processor = Wav2Vec2Processor.from_pretrained(asr, sampling_rate=SAMPLE_RATE, return_attention_mask=True)
+    teacher_model = get_model(args, original=False) if teacher_student else None
+    processor = Wav2Vec2Processor.from_pretrained(args.asr, sampling_rate=sample_rate, return_attention_mask=True) if args.asr.startswith("facebook") else None
 
-    if teacher_student:
-        model = Wav2Vec2ForCTC.from_pretrained(asr).eval().cuda()
-        model = configure_model(model)
+    if episodic:
+        original_model_state, original_optimizer_state, original_scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
-        teacher_model = Wav2Vec2ForCTC.from_pretrained(asr).eval().cuda()
-        student_model = Wav2Vec2ForCTC.from_pretrained(asr).eval().cuda()
-        # teacher_model = configure_model(teacher_model)
-        # student_model = configure_model(student_model)
-        params, param_names = collect_params(student_model, bias_only, train_feature, train_all, train_LN)
-        optimizer, scheduler = setup_optimizer(params, opt, lr, scheduler=scheduler)
-        if episodic:
-            model_state, optimizer_state, scheduler_state = copy_model_and_optimizer(student_model, optimizer, scheduler)
+    for batch_idx, batch in enumerate(dataset):
+        if batch_idx >= 3000:
+            break
 
-    else:
-        model = Wav2Vec2ForCTC.from_pretrained(asr).eval().cuda()
-        # setup for tent
-        model = configure_model(model)
-        params, param_names = collect_params(model, bias_only, train_feature, train_all, train_LN)
-        optimizer, scheduler = setup_optimizer(params, opt, lr, scheduler=scheduler)
-        if episodic: 
-            model_state, optimizer_state, scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
-
-    queue_maxsize = 256
-    n_neighbors = 6
-
-    if method == 'cr':
-        memory_queue = Queue(maxsize=queue_maxsize)
-
-    count = 0
-    start = time.time()
-    for batch in dataset:
-        lens, wavs, texts, files = batch
-
-        inputs = processor(wavs, sampling_rate=SAMPLE_RATE, return_tensors="pt", padding="longest")
-        input_values = inputs.input_values.cuda().squeeze(1)
-        duration = input_values.shape[1] / SAMPLE_RATE
-        durations.append(duration)
-
-        if episodic:
-            print("reload model")
-            model, optimizer, scheduler = load_model_and_optimizer(model, optimizer, None, model_state, optimizer_state, scheduler_state)
-        
-        # print(torch.tensor([input_values.shape[1]]).to('cuda').shape)
-        # kwargs = {"input_signal": input_values.to('cuda'), "input_signal_length": torch.tensor([input_values.shape[1]]).to('cuda')}
-
-        # encoded, encoded_len = asr_model.forward(input_values.to('cuda'), torch.tensor([input_values.shape[1]]).to('cuda'), processed_signal=None, processed_signal_length=None)
-
-        # encoded, encoded_len = self.forward(
-        #     input_signal=test_batch[0].to(device), input_signal_length=test_batch[1].to(device)
-        # )
-        # best_hyp, all_hyp = self.decoding.rnnt_decoder_predictions_tensor(
-        #     encoded,
-        #     encoded_len,
-        #     return_hypotheses=return_hypotheses,
-        #     partial_hypotheses=partial_hypothesis,
-        # )
-
-        # print(lens)
-        # print(wavs, lens)
-        # print(asr_model.encode_batch(input_values, torch.Tensor([1])))
-        # print(asr_model.encode_batch(input_values, torch.Tensor([1])).shape)
-        # print(asr_model.transcribe_batch(input_values, torch.Tensor([1])))
-
-        # vanilla forward
-        with torch.no_grad():
-            outputs = model(input_values).logits
-        predicted_ids = torch.argmax(outputs, dim=-1)
-        ori_transcription = processor.batch_decode(predicted_ids)
-        ori_transcriptions += ori_transcription
-        ori_wer = wer(list(texts), list(ori_transcription))
-        print("\noriginal WER: ", ori_wer)
-
-        # # forward-hook
-        # from matplotlib import pyplot as plt
-        # import seaborn as sns
-        # from sklearn.manifold import TSNE
-        # tsne = TSNE(n_components=2)
-
-        # mid_outputs, model_outputs = mid_getter(input_values)
-        # predicted_ids = torch.argmax(model_outputs.logits, dim=-1)
-        # non_blank_frames = torch.where(predicted_ids != 0, 1, 0).bool()
-
-        # try:
-        #     activation_list.extend(mid_outputs['dropout'][non_blank_frames].squeeze(0).detach().cpu().tolist())
-        #     id_list.extend(torch.argmax(model_outputs.logits[non_blank_frames].squeeze(0), dim=-1).detach().cpu().tolist())
-        #     compressed_list = tsne.fit_transform(activation_list)
-        # except:
-        #     continue
-
-        # fig = plt.figure(figsize = (10,10))
-        # plt.axis('off')
-        # plt.legend(list(json.load(open('vocab.json')).keys()))
-        # sns.set_style('darkgrid')
-        # sns.scatterplot(compressed_list[:,0], compressed_list[:,1], hue=id_list, legend='full')
-        # plt.savefig("tsne.png")
-
-        # from matplotlib import pyplot as plt
-        # plt.figure()
-        # plt.title("entropy distribution")
-        # plt.hist(softmax_entropy(outputs).squeeze(0).detach().cpu(), color='green', alpha=0.5, edgecolor='black', bins=200)
-        # plt.savefig(f"imgs/{files}.png")
-
-        # SUTA
-        for i in range(steps):
-            if method == 'em_uncertainty':
-                outputs = forward_and_adapt_em_uncertainty(input_values, model, optimizer, em_coef, reweight, temp, non_blank, scheduler, div_coef)
-            elif method == 'em_sparse':
-                outputs = forward_and_adapt_em_sparse(input_values, model, optimizer, em_coef, reweight, temp, non_blank, scheduler, div_coef)
-            elif method == 'cr':
-                if teacher_student:
-                    outputs = forward_and_adapt_cr(input_values, student_model, optimizer, em_coef, reweight, temp, non_blank, scheduler, div_coef, teacher_model=teacher_model)
-                else:
-                    outputs = forward_and_adapt_cr(input_values, model, optimizer, em_coef, reweight, temp, non_blank, scheduler, div_coef)
-            else: # original
-                outputs = forward_and_adapt(input_values, model, optimizer, em_coef, reweight, temp, non_blank, scheduler, div_coef)
-
-            # if episodic:
-            if i == 0: 
-                predicted_ids = torch.argmax(outputs, dim=-1)
-                transcription = processor.batch_decode(predicted_ids)
-                ada_wer = wer(list(texts), list(transcription))
-                print("adapt-1 WER:  ", ada_wer)
-                # print(texts, transcription)
-                transcriptions_1 += transcription
-
-            if i == 2: 
-                predicted_ids = torch.argmax(outputs, dim=-1)
-                transcription = processor.batch_decode(predicted_ids)
-                ada_wer = wer(list(texts), list(transcription))
-                print("adapt-3 WER:  ", ada_wer)
-                # print(texts, transcription)
-                transcriptions_3 += transcription
-
-            if i == 4: 
-                predicted_ids = torch.argmax(outputs, dim=-1)
-                transcription = processor.batch_decode(predicted_ids)
-                ada_wer = wer(list(texts), list(transcription))
-                print("adapt-5 WER:  ", ada_wer)
-                # print(texts, transcription)
-                transcriptions_5 += transcription
-
-            if i == 9: 
-                predicted_ids = torch.argmax(outputs, dim=-1)
-                transcription = processor.batch_decode(predicted_ids)
-                ada_wer = wer(list(texts), list(transcription))
-                print("adapt-10 WER: ", ada_wer)
-                # print(texts, transcription)
-                werr = ori_wer - ada_wer
-                werrs.append(werr)
-                transcriptions_10 += transcription
-                
-            if i == 19: 
-                predicted_ids = torch.argmax(outputs, dim=-1)
-                transcription = processor.batch_decode(predicted_ids)
-                ada_wer = wer(list(texts), list(transcription))
-                # print("adapt-20 WER: ", ada_wer)
-                # print(texts, transcription)
-                transcriptions_20 += transcription
-
-            if  i == 39: 
-                predicted_ids = torch.argmax(outputs, dim=-1)
-                transcription = processor.batch_decode(predicted_ids)
-                ada_wer = wer(list(texts), list(transcription))
-                # print("adapt-40 WER: ", ada_wer)
-                # print(texts, transcription)
-                transcriptions_40 += transcription
-
-        if teacher_student:
-            # stochastic restoration
-            for student_param, original_param in zip(student_model.parameters(), model.parameters()):
-                import numpy as np
-                p = 0.01
-                restore = np.random.binomial(n=1, p=p, size=1)[0]
-                with torch.no_grad():
-                    student_param.copy_(restore * student_param + (1 - restore) * original_param)
-
-        del input_values
-        torch.cuda.empty_cache()
+        lens, wavs, texts, _ = batch
+        if not args.asr.startswith("facebook"):
+            wavs = torch.tensor(wavs).to(torch.device(args.device))
+        lens = lens.to(torch.device(args.device))
         gt_texts += texts
 
-    print("asr:", asr)
-    print(f'non-adapted count = {count}')
-    print(f'dataset num = {len(dataset)}')
-    print("original WER:", wer(gt_texts, ori_transcriptions))
-    if steps >= 10: 
-        print("TTA-1 WER:", wer(gt_texts, transcriptions_1))
-        print("TTA-3 WER:", wer(gt_texts, transcriptions_3))
-        print("TTA-5 WER:", wer(gt_texts, transcriptions_5))
-        print("TTA-10 WER:", wer(gt_texts, transcriptions_10))
-    if steps >= 20: 
-        print("TTA-20 WER:", wer(gt_texts, transcriptions_20))
-    if steps >= 40:
-        print("TTA-40 WER:", wer(gt_texts, transcriptions_40))
-    print('------------------------------------')
+        ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
+        ori_transcriptions += ori_transcription
 
-    if not os.path.exists(log_dir):
-        os.mkdir(log_dir)
+        ori_wer = wer(list(texts), list(ori_transcription))
+        logger.info(f"{batch_idx}/{len(dataset)}")
+        logger.info(f"original WER: {ori_wer}")
 
-    with open(os.path.join(log_dir, exp_name+".txt"), 'w') as f:
-        f.write("=====Hyperparameters=====\n")
-        for k, v in vars(args).items():
-            f.write(f"{k}: {v}\n")
-        f.write("====================\n")
-        f.write(f"original WER: {wer(gt_texts, ori_transcriptions)}\n")
-        if steps >= 10: 
-            f.write(f"TTA-1 WER: {wer(gt_texts, transcriptions_1)}\n")
-            f.write(f"TTA-3 WER: {wer(gt_texts, transcriptions_3)}\n")
-            f.write(f"TTA-5 WER: {wer(gt_texts, transcriptions_5)}\n")
-            f.write(f"TTA-10 WER: {wer(gt_texts, transcriptions_10)}\n")
-        if steps >= 20:
-            f.write(f"TTA-20 WER: {wer(gt_texts, transcriptions_20)}\n")
-        if steps >= 40:
-            f.write(f"TTA-40 WER: {wer(gt_texts, transcriptions_40)}\n")
-    
-    csv_path = os.path.join(log_dir, exp_name+'.csv')
-    df = pd.DataFrame({'duration': durations, 'WERR': werrs})
-    df.to_csv(csv_path)
+        if episodic:
+            model, optimizer, scheduler = load_model_and_optimizer(model, optimizer, scheduler, original_model_state, original_optimizer_state, original_scheduler_state)
+
+        for step_idx in range(1, steps + 1):
+
+            if args.asr.startswith("facebook"): # ctc
+                forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens)
+            elif args.asr.startswith("speechbrain"): # attention-based encoder-decoder
+                model.train()
+                forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens)
+                model.eval()
+            else: # transducer
+                model.train()
+                forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens)
+                model.eval()
+
+            if step_idx in [1, 3, 5, 10, 20, 40]:
+                transcription = transcribe_batch(args, model, processor, wavs, lens)
+                transcription_list = eval(f"transcriptions_{step_idx}")
+                transcription_list += transcription
+
+                ada_wer = wer(list(texts), list(transcription))
+                logger.info(f"adapt-{step_idx} WER: {ada_wer}")
+
+        if stochastic_restoration:
+            for model_param, original_param in zip(model.parameters(), original_model.parameters()):
+                restore = np.random.binomial(n=1, p=restore_prob, size=1)[0]
+                with torch.no_grad():
+                    model_param.copy_((1 - restore) * model_param + restore * original_param)
+
+        if teacher_student:
+            for teacher_param, model_param in zip(teacher_model.parameters(), model.parameters()):
+                with torch.no_grad():
+                    teacher_param.copy_(momentum * teacher_param + (1 - momentum) * model_param)
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        logger.info("\n")
+
+    torch.save(model.state_dict(), os.path.join(args.log_dir, "model.pt"))
+
+    logger.info(f"number of data : {len(dataset)}")
+    logger.info(f"original WER: {wer(gt_texts, ori_transcriptions)}")
+    for step_idx in [1, 3, 5, 10, 20, 40]:
+        if step_idx <= steps:
+            transcription_list = eval(f"transcriptions_{step_idx}")
+            logger.info(f"TTA-{step_idx}: {wer(gt_texts, transcription_list)}")
 
 
 
-transcriptions_1 = []
-transcriptions_3 = []
-transcriptions_5 = []
-transcriptions_10 = []
-transcriptions_20 = []
-transcriptions_40 = []
-gt_texts = []
-ori_transcriptions = []
-durations = []
-werrs = []
-
-for i, batch in enumerate(dataset):
-    lens, wavs, texts, files = batch
-    wavs = torch.tensor(wavs)
-
-    ori_transcription, _ = original_model.transcribe_batch(wavs, wav_lens=torch.tensor([1.0]))
-    ori_transcriptions += ori_transcription
-    ori_wer = wer(list(texts), list(ori_transcription))
-    gt_texts += texts
-    print(f"\n{i}/{len(dataset)}\noriginal WER: {ori_wer}")
-
-    model, optim, _ = load_model_and_optimizer(model, optim, None, model_state, optim_state, None)
-    for i in range(steps):
-        model.train()
-        forward_and_adapt_cr_attention(wavs, model, optim)
-
-        if i + 1 in [1, 3, 5, 10, 20, 40]:
-            model.eval()
-            transcription, _ = model.transcribe_batch(wavs, wav_lens=torch.tensor([1.0]))
-            ada_wer = wer(list(texts), list(transcription))            
-            print(f"adapt-{i + 1} WER: ", ada_wer)
-            transcription_list = eval(f"transcriptions_{i + 1}")
-            transcription_list += transcription
-
-    del wavs
-    torch.cuda.empty_cache()
-
-print("original WER:", wer(gt_texts, ori_transcriptions))
-if steps >= 10: 
-    print("TTA-1 WER:", wer(gt_texts, transcriptions_1))
-    print("TTA-3 WER:", wer(gt_texts, transcriptions_3))
-    print("TTA-5 WER:", wer(gt_texts, transcriptions_5))
-    print("TTA-10 WER:", wer(gt_texts, transcriptions_10))
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
