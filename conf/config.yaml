@@ -1,15 +1,17 @@
 # model
-asr: speechbrain/asr-crdnn-rnnlm-librispeech # facebook/wav2vec2-base-960h, speechbrain/asr-crdnn-rnnlm-librispeech, pretrained_models/stt_en_conformer_transducer_small.nemo
+# asr: facebook/wav2vec2-base-960h
+# asr: speechbrain/asr-crdnn-rnnlm-librispeech
+asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 
 # dataset
 # dataset_name: librispeech
 # dataset_dir: /mnt/hdd0/changhun_workspace/LibriSpeech
-dataset_name: chime
-dataset_dir: /home/server08/hdd0/changhun_workspace/CHiME3
+# dataset_name: chime
+# dataset_dir: /home/server08/hdd0/changhun_workspace/CHiME3
 # dataset_name: commonvoice
 # dataset_dir: /home/server08/hdd0/changhun_workspace/cv-corpus-5.1-2020-06-22/en
-# dataset_name: ted
-# dataset_dir: /home/server08/hdd0/changhun_workspace/TEDLIUM_release2/test
+dataset_name: ted
+dataset_dir: /home/server08/hdd0/changhun_workspace/TEDLIUM_release2/test
 split: [test-other]
 batch_size: 1
 extra_noise: 0
@@ -17,19 +19,21 @@ sample_rate: 16000
 
 # optimizer & train hyparameters
 optimizer: AdamW
-lr: 2e-6
+lr: 2e-5
 scheduler: null
-steps: 10
-train_params: [all] # currently supported: all, feature, LN
+steps: 1
+train_params: [LN] # currently supported: all, feature, LN, linear(linear probing)
 bias_only: false
 episodic: true # load pretrained model for every batch
 
 # methods and general hyperparameters
-method: cr # original, em_uncertainty, em_sparse, cr
+method: cr # currently supported: original, em_uncertainty, em_sparse, cr
 teacher_student: false
-momentum: 0.9
+momentum: 0.99
+
 stochastic_restoration: false
 restore_prob: 0.01
+
 prob_threshold: 0.9
 entropy_threshold: 0.05
 
@@ -39,7 +43,7 @@ reweight: true
 em_coef: 0.3
 temp: 2.5 # temperature smoothing
 div_coef: 0
-aug_type: td_spec_aug # audio_aug, td_spec_aug, spec_aug
+aug_type: augmix
 
 # memory queue
 use_memory_queue: false
@@ -50,4 +54,4 @@ n_neighbors: 6
 device: cuda
 
 # logging
-log_dir: exps/test
+log_dir: exps/cr_linear_attention
