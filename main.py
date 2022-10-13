@@ -257,12 +257,12 @@ def transcribe_batch(args, model, processor, wavs, lens):
             predicted_ids = torch.argmax(outputs, dim=-1)
             transcription = processor.batch_decode(predicted_ids)
         elif isinstance(model, EncoderDecoderASR):
-            transcription, _, _ = model.transcribe_batch(wavs, wav_lens=torch.ones(len(wavs)).to(args.device))
-            # transcription = []
-            # for wav in wavs:
-            #     wav = wav.unsqueeze(0)
-            #     text, _, _ = model.transcribe_batch(wav, wav_lens=torch.ones(len(wav)).to(args.device))
-            #     transcription.append(text)
+            # transcription = model.transcribe_batch(wavs, wav_lens=torch.ones(len(wavs)).to(args.device))[0]
+            transcription = []
+            for wav in wavs:
+                wav = wav.unsqueeze(0)
+                text, _, _ = model.transcribe_batch(wav, wav_lens=torch.ones(len(wav)).to(args.device))
+                transcription.append(text)
         elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel): # conformer from nemo
             encoded_feature, encoded_len = model(input_signal=wavs, input_signal_length=lens)
             best_hyp_texts, _ = model.decoding.rnnt_decoder_predictions_tensor(
@@ -1067,24 +1067,15 @@ def main(args):
     current = time.time()
 
     for batch_idx, batch in enumerate(dataset):
-        if batch_idx > 100:
-            break
         lens, wavs, texts, _ = batch
         if not isinstance(model, Wav2Vec2ForCTC):
             wavs = [torch.from_numpy(wav) for wav in wavs]
             wavs = pad_sequence(wavs, batch_first=True).to(args.device)
         lens = lens.to(args.device)
 
-        print(f"1 : {time.time() - current}")
-        current = time.time()
-
-        gt_texts += texts
         ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
         ori_transcriptions += ori_transcription
         ori_wer = wer(list(texts), list(ori_transcription))
-
-        print(f"2 : {time.time() - current}")
-        current = time.time()
 
         logger.info(f"{batch_idx}/{len(dataset)}")
         logger.info(f"original WER: {ori_wer}")
@@ -1105,9 +1096,6 @@ def main(args):
         logger.info(f"ground truth : {list(texts)}")
         logger.info(f"original transcrption : {list(ori_transcription)}")
 
-        print(f"3 : {time.time() - current}")
-        current = time.time()
-
         if "da" in args.method:
             adapter = nn.Linear(in_features=128, out_features=128, bias=False).requires_grad_(True).to(args.device)
             optimizer.add_param_group({'params': [p for p in adapter.parameters()]})
@@ -1126,9 +1114,6 @@ def main(args):
                 forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens)
                 # model.eval()
 
-            print(f"4-{step_idx} : {time.time() - current}")
-            current = time.time()
-
             if step_idx in [1, 3, 5, 10, 20, 40]:
                 transcription = transcribe_batch(args, model, processor, wavs, lens)
                 transcription_list = eval(f"transcriptions_{step_idx}")
@@ -1138,14 +1123,8 @@ def main(args):
                 logger.info(f"adapt-{step_idx} WER: {ada_wer}")
                 logger.info(f"adapt-{step_idx} text: {' '.join(list(transcription))}")
 
-            print(f"5-{step_idx} : {time.time() - current}")
-            current = time.time()
-
             gc.collect()
             torch.cuda.empty_cache()
-
-        print(f"6-{step_idx} : {time.time() - current}")
-        current = time.time()
 
         if stochastic_restoration:
             for model_param, original_param in zip(model.parameters(), original_model.parameters()):
@@ -1158,10 +1137,7 @@ def main(args):
                 with torch.no_grad():
                     teacher_param.copy_(momentum * teacher_param + (1 - momentum) * model_param)
 
-        logger.info("\n\n\n")
-
-        print(f"7-{step_idx} : {time.time() - current}")
-        current = time.time()
+        logger.info("\n")
 
     logger.info(OmegaConf.to_yaml(args))
     logger.info(f"number of data : {len(dataset)}")
