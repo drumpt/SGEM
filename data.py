@@ -19,7 +19,6 @@ def collect_audio_batch(batch, extra_noise=0., maxLen=600000):
         if wav.shape[-1] >= maxLen:
             print(f'{filepath} has len {wav.shape}, truncate to {maxLen}')
             wav = wav[:maxLen]
-            print(wav.shape)
         wav += extra_noise * torch.randn_like(wav)
         return wav
 
@@ -72,8 +71,13 @@ def create_dataset(split, name, path, batch_size=1):
 def load_dataset(split=None, name='librispeech', path=None, batch_size=1, extra_noise=0., num_workers=4):
     ''' Prepare dataloader for training/validation'''
     dataset, loader_bs = create_dataset(split, name, path, batch_size)
-    collate_fn = partial(collect_audio_batch, extra_noise=extra_noise)
+    if name=="librispeech":
+        collate_fn = partial(collect_audio_batch, extra_noise=extra_noise)
+    else:
+        collate_fn = partial(collect_audio_batch, extra_noise=0)
 
     dataloader = DataLoader(dataset, batch_size=loader_bs, shuffle=False,
                             collate_fn=collate_fn, num_workers=num_workers)
+    # dataloader = DataLoader(dataset, batch_size=loader_bs, shuffle=True,
+    #                         collate_fn=collate_fn, num_workers=num_workers)
     return dataloader
