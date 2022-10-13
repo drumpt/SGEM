@@ -6,10 +6,14 @@ import re
 # audio_path  = '/home/daniel094144/data/TEDLIUM_release2/test/wav'
 # save_audio_dir = '/home/daniel094144/data/TEDLIUM_release2/test/wav_segment'
 # save_text_dir = '/home/daniel094144/data/TEDLIUM_release2/test/transcription'
-stm_path = '/home/server08/hdd0/changhun_workspace/TEDLIUM_release2/test/stm'
-audio_path  = '/home/server08/hdd0/changhun_workspace/TEDLIUM_release2/test/wav'
-save_audio_dir = '/home/server08/hdd0/changhun_workspace/TEDLIUM_release2/test/wav_segment'
-save_text_dir = '/home/server08/hdd0/changhun_workspace/TEDLIUM_release2/test/transcription'
+# stm_path = '/home/server08/hdd0/changhun_workspace/TEDLIUM_release2/test/stm'
+# audio_path  = '/home/server08/hdd0/changhun_workspace/TEDLIUM_release2/test/wav'
+# save_audio_dir = '/home/server08/hdd0/changhun_workspace/TEDLIUM_release2/test/wav_segment'
+# save_text_dir = '/home/server08/hdd0/changhun_workspace/TEDLIUM_release2/test/transcription'
+stm_path = '/home/server17/hdd/changhun_workspace/TEDLIUM_release2/test/stm'
+audio_path  = '/home/server17/hdd/changhun_workspace/TEDLIUM_release2/test/wav'
+save_audio_dir = '/home/server17/hdd/changhun_workspace/TEDLIUM_release2/test/wav_segment'
+save_text_dir = '/home/server17/hdd/changhun_workspace/TEDLIUM_release2/test/transcription'
 
 SAMPLE_RATE = 16000
 
