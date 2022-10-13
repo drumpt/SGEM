@@ -5,15 +5,15 @@ asr: speechbrain/asr-crdnn-rnnlm-librispeech
 
 # dataset
 # dataset_name: librispeech
-# dataset_dir: /home/server17/hdd/changhun_workspace/LibriSpeech
+# dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/LibriSpeech
 dataset_name: chime
 dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/CHiME3
 # dataset_name: commonvoice
-# dataset_dir: /home/server17/hdd/changhun_workspace/cv-corpus-5.1-2020-06-22/en
+# dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/cv-corpus-5.1-2020-06-22/en
 # dataset_name: ted
-# dataset_dir: /home/server17/hdd/changhun_workspace/TEDLIUM_release2/test
+# dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/TEDLIUM_release2/test
 split: [test-other]
-extra_noise: 0.00
+extra_noise: 0.01
 sample_rate: 16000
 batch_size: 32
 
@@ -43,7 +43,7 @@ num_augs: 1
 aug_method: augmix # augmix, standard
 not_blank: true
 reweight: true
-em_coef: 1
+em_coef: 0
 temp: 2.5 # temperature smoothing
 div_coef: 0
 
@@ -56,4 +56,4 @@ n_neighbors: 6
 device: cuda
 
 # logging
-log_dir: exps/test
+log_dir: exps/attention_mcc
