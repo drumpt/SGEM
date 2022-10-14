@@ -257,18 +257,22 @@ def transcribe_batch(args, model, processor, wavs, lens):
             predicted_ids = torch.argmax(outputs, dim=-1)
             transcription = processor.batch_decode(predicted_ids)
         elif isinstance(model, EncoderDecoderASR):
-            transcription, _, _ = model.transcribe_batch(wavs, wav_lens=torch.ones(len(wavs)).to(args.device))
-            # transcription = []
-            # for wav in wavs:
-            #     wav = wav.unsqueeze(0)
-            #     text, _, _ = model.transcribe_batch(wav, wav_lens=torch.ones(len(wav)).to(args.device))
-            #     transcription.append(text)
+            # transcription = model.transcribe_batch(wavs, wav_lens=torch.ones(len(wavs)).to(args.device))[0]
+            transcription = []
+            for wav in wavs:
+                wav = wav.unsqueeze(0)
+                text = model.transcribe_batch(wav, wav_lens=torch.ones(len(wav)).to(args.device))[0]
+                transcription.append(text[0])
         elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel): # conformer from nemo
-            encoded_feature, encoded_len = model(input_signal=wavs, input_signal_length=lens)
-            best_hyp_texts, _ = model.decoding.rnnt_decoder_predictions_tensor(
-                encoder_output=encoded_feature, encoded_lengths=encoded_len, return_hypotheses=False
-            )
-            transcription = [best_hyp_text.upper() for best_hyp_text in best_hyp_texts]
+            transcription = []
+            for wav in wavs:
+                wav = wav.unsqueeze(0)
+                encoded_feature, encoded_len = model(input_signal=wav, input_signal_length=lens)
+                best_hyp_texts, _ = model.decoding.rnnt_decoder_predictions_tensor(
+                    encoder_output=encoded_feature, encoded_lengths=encoded_len, return_hypotheses=False
+                )
+                text = [best_hyp_text.upper() for best_hyp_text in best_hyp_texts][0]
+                transcription.append(text)
     return transcription
 
 
@@ -606,8 +610,8 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
     if "em_joint" in args.method:
         log_probs_lst = forward_attn(args, model, greedy_searcher, wavs)
         log_prob_tensor = torch.stack(log_probs_lst, dim=1)
-        max_probs, _ = torch.max(log_prob_tensor, dim=-1, keepdim=False)
-        sum_log_probs = torch.sum(max_probs, dim=-1)
+        max_log_probs, _ = torch.max(log_prob_tensor, dim=-1, keepdim=False)
+        sum_log_probs = torch.sum(max_log_probs, dim=-1)
         nll_loss = - sum_log_probs.mean()
         nll_loss.backward()
     if "p_logp" in args.method:
@@ -651,21 +655,23 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
         _, strong_augmentation_list = get_augmentation(args)
  
         for wav in wavs:
-            aug_wav_list = [wav.unsqueeze(0)]
-            for _ in range(num_augs):
-                aug_wav_list.append(apply_augmentation(args, strong_augmentation_list, wav.unsqueeze(0)).to(args.device))
-            aug_wav = torch.stack(aug_wav_list).view(-1, wav.shape[-1])
+            wav = wav.unsqueeze(0)
+            for i in range(num_augs):
+                if i > 0:
+                    aug_wav = apply_augmentation(args, strong_augmentation_list, wav).to(args.device)
+                else:
+                    aug_wav = wav
 
-            log_probs_lst = forward_attn(args, model, greedy_searcher, aug_wav)
-            log_prob_tensor = torch.stack(log_probs_lst, dim=1)
-            predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
-            non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
+                log_probs_lst = forward_attn(args, model, greedy_searcher, aug_wav)
+                log_prob_tensor = torch.stack(log_probs_lst, dim=1)
+                predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
+                # non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
 
-            mean_prob = torch.mean(torch.softmax(log_prob_tensor, dim=-1), dim=0, keepdim=True)
-            mean_log_prob = torch.mean(torch.log_softmax(log_prob_tensor, dim=-1), dim=0, keepdim=True)
+                mean_prob = torch.mean(torch.softmax(log_prob_tensor, dim=-1), dim=0, keepdim=True)
+                mean_log_prob = torch.mean(torch.log_softmax(log_prob_tensor, dim=-1), dim=0, keepdim=True)
 
-            e_loss = - torch.sum(mean_prob * mean_log_prob, dim=-1).mean()
-            (e_loss / (len(wavs) * len(aug_wav))).backward()
+                e_loss = - torch.sum(mean_prob * mean_log_prob, dim=-1).mean()
+                (e_loss / (len(wavs) * num_augs)).backward()
 
     optimizer.step()
     if scheduler is not None: 
@@ -941,24 +947,26 @@ def forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, sc
 
         return log_probs_lst
 
-    loss = 0
+    optimizer.zero_grad()
     if "original" in args.method or "em_uncertainty" in args.method or "em_sparse" in args.method:
-        log_probs_lst = forward_trans(args, model, wavs, lens, gt_wavs=None)
-        log_prob_tensor = torch.stack(log_probs_lst, dim=1)
-        if args.em_coef > 0:
-            if "original" in args.method:
-                e_loss = softmax_entropy(log_prob_tensor / args.temp, dim=-1).mean(0).mean()
-            elif "em_uncertainty" in args.method:
-                frame_weight = F.normalize(torch.reciprocal(softmax_entropy(log_prob_tensor)), p=1, dim=-1).detach()
-                e_loss = torch.sum(frame_weight * softmax_entropy(log_prob_tensor / args.temp), dim=-1).mean()
-            elif "em_sparse" in args.method:
-                selected_frame = torch.where(softmax_entropy(log_prob_tensor, dim=-1) < args.entropy_threshold, 1, 0).bool()
-                e_loss = softmax_entropy(log_prob_tensor / args.temp)[selected_frame].mean(0).mean()
-            loss += args.em_coef * e_loss
+        for i, wav in enumerate(wavs):
+            wav = wav.unsqueeze(0)
+            log_probs_lst = forward_trans(args, model, wav, torch.tensor([lens[i]]).to(wav.device), gt_wavs=None)
+            log_prob_tensor = torch.stack(log_probs_lst, dim=1)
+            if args.em_coef > 0:
+                if "original" in args.method:
+                    e_loss = softmax_entropy(log_prob_tensor / args.temp, dim=-1).mean(0).mean()
+                elif "em_uncertainty" in args.method:
+                    frame_weight = F.normalize(torch.reciprocal(softmax_entropy(log_prob_tensor)), p=1, dim=-1).detach()
+                    e_loss = torch.sum(frame_weight * softmax_entropy(log_prob_tensor / args.temp), dim=-1).mean()
+                elif "em_sparse" in args.method:
+                    selected_frame = torch.where(softmax_entropy(log_prob_tensor, dim=-1) < args.entropy_threshold, 1, 0).bool()
+                    e_loss = softmax_entropy(log_prob_tensor / args.temp)[selected_frame].mean(0).mean()
+                ((args.em_coef / len(wavs)) * e_loss).backward()
 
-        if 1 - args.em_coef > 0:
-            c_loss = mcc_loss(log_prob_tensor / args.temp, reweight=args.reweight, class_num=1000)
-            loss += (1 - args.em_coef) * c_loss
+            if 1 - args.em_coef > 0:
+                c_loss = mcc_loss(log_prob_tensor / args.temp, reweight=args.reweight, class_num=1000)
+                (((1 - args.em_coef) / len(wavs)) * c_loss).backward()
     if "cr" in args.method:
         weak_augmentation_list, strong_augmentation_list = get_augmentation(args)
         ctc_loss = CTCLoss(num_classes=1000)
@@ -999,11 +1007,8 @@ def forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, sc
         )
         del strong_wavs, strong_outputs
 
-    optimizer.zero_grad()
-    if not isinstance(loss, int):
-        loss.backward()
     optimizer.step()
-    if scheduler is not None: 
+    if scheduler is not None:
         scheduler.step()
 
 
@@ -1064,8 +1069,6 @@ def main(args):
     if episodic:
         original_model_state, original_optimizer_state, original_scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
-    current = time.time()
-
     for batch_idx, batch in enumerate(dataset):
         if batch_idx > 100:
             break
@@ -1075,16 +1078,13 @@ def main(args):
             wavs = pad_sequence(wavs, batch_first=True).to(args.device)
         lens = lens.to(args.device)
 
-        print(f"1 : {time.time() - current}")
-        current = time.time()
-
         gt_texts += texts
         ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
         ori_transcriptions += ori_transcription
-        ori_wer = wer(list(texts), list(ori_transcription))
 
-        print(f"2 : {time.time() - current}")
-        current = time.time()
+        print(f"list(texts) : {list(texts)}")
+        print(f"list(ori_transcription) : {list(ori_transcription)}")
+        ori_wer = wer(list(texts), list(ori_transcription))
 
         logger.info(f"{batch_idx}/{len(dataset)}")
         logger.info(f"original WER: {ori_wer}")
@@ -1105,9 +1105,6 @@ def main(args):
         logger.info(f"ground truth : {list(texts)}")
         logger.info(f"original transcrption : {list(ori_transcription)}")
 
-        print(f"3 : {time.time() - current}")
-        current = time.time()
-
         if "da" in args.method:
             adapter = nn.Linear(in_features=128, out_features=128, bias=False).requires_grad_(True).to(args.device)
             optimizer.add_param_group({'params': [p for p in adapter.parameters()]})
@@ -1118,16 +1115,9 @@ def main(args):
             if isinstance(model, Wav2Vec2ForCTC): # ctc
                 forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens)
             elif isinstance(model, EncoderDecoderASR): # attention-based encoder-decoder
-                # model.train()
                 forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens, adapter=adapter, step_idx=step_idx)
-                # model.eval()
             elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel): # transducer
-                # model.train()
                 forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens)
-                # model.eval()
-
-            print(f"4-{step_idx} : {time.time() - current}")
-            current = time.time()
 
             if step_idx in [1, 3, 5, 10, 20, 40]:
                 transcription = transcribe_batch(args, model, processor, wavs, lens)
@@ -1138,14 +1128,8 @@ def main(args):
                 logger.info(f"adapt-{step_idx} WER: {ada_wer}")
                 logger.info(f"adapt-{step_idx} text: {' '.join(list(transcription))}")
 
-            print(f"5-{step_idx} : {time.time() - current}")
-            current = time.time()
-
             gc.collect()
             torch.cuda.empty_cache()
-
-        print(f"6-{step_idx} : {time.time() - current}")
-        current = time.time()
 
         if stochastic_restoration:
             for model_param, original_param in zip(model.parameters(), original_model.parameters()):
@@ -1159,9 +1143,6 @@ def main(args):
                     teacher_param.copy_(momentum * teacher_param + (1 - momentum) * model_param)
 
         logger.info("\n\n\n")
-
-        print(f"7-{step_idx} : {time.time() - current}")
-        current = time.time()
 
     logger.info(OmegaConf.to_yaml(args))
     logger.info(f"number of data : {len(dataset)}")
