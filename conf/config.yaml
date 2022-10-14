@@ -4,10 +4,10 @@ asr: speechbrain/asr-crdnn-rnnlm-librispeech
 # asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 
 # dataset
-# dataset_name: librispeech
-# dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/LibriSpeech
-dataset_name: chime
-dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/CHiME3
+dataset_name: librispeech
+dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/LibriSpeech
+# dataset_name: chime
+# dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/CHiME3
 # dataset_name: commonvoice
 # dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/cv-corpus-5.1-2020-06-22/en
 # dataset_name: ted
@@ -15,37 +15,35 @@ dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/CHiME3
 split: [test-other]
 extra_noise: 0.01
 sample_rate: 16000
-batch_size: 8
+batch_size: 4
 
 # optimizer & train hyparameters
 optimizer: AdamW
-lr: 2e-6
 scheduler: null
-steps: 10
+lr: 5e-6
+steps: 5
 train_params: [all] # currently supported: all, feature, LN, linear(linear probing), da
 bias_only: false
 episodic: true # load pretrained model for every batch
 
-# methods and general hyperparameters
-method: [original] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, (cr), cr_feature, da, contrastive_temporal, p_logp
+# methods and hyperparameters
+method: [p_logp] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, (cr), cr_feature, da, contrastive_temporal, p_logp
+temp: 2.5 # temperature smoothing
+em_coef: 0
+div_coef: 0
+num_augs: 2
+aug_method: augmix # augmix, standard
+not_blank: true
+reweight: true
+
+prob_threshold: 0.9
+entropy_threshold: 0.05
 
 teacher_student: false
 momentum: 0.99
 
 stochastic_restoration: false
 restore_prob: 0.01
-
-prob_threshold: 0.9
-entropy_threshold: 0.05
-
-# method-specific hyperparameters
-num_augs: 1
-aug_method: augmix # augmix, standard
-not_blank: true
-reweight: true
-em_coef: 0
-temp: 2.5 # temperature smoothing
-div_coef: 0
 
 # memory queue
 use_memory_queue: false
@@ -56,4 +54,4 @@ n_neighbors: 6
 device: cuda
 
 # logging
-log_dir: exps/attention_mcc
+log_dir: exps/attention_p_logp_libri
