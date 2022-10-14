@@ -11,11 +11,11 @@ dataset_dir: /home/server17/hdd/changhun_workspace/CHiME3
 # dataset_name: commonvoice
 # dataset_dir: /home/server17/hdd/changhun_workspace/cv-corpus-5.1-2020-06-22/en
 # dataset_name: ted
-# dataset_dir: /home/server17/hdd/changhun_workspace/TEDLIUM_release2/test
+# dataset_dir: /home/server17/Hdd/changhun_workspace/TEDLIUM_release2/test
 split: [test-other]
-extra_noise: 0.00
+extra_noise: 0.01
 sample_rate: 16000
-batch_size: 2
+batch_size: 4
 
 # optimizer & train hyparameters
 optimizer: AdamW
@@ -27,11 +27,11 @@ bias_only: false
 episodic: true # load pretrained model for every batch
 
 # methods and hyperparameters
-method: [em_aug] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, (cr), cr_feature, da, contrastive_temporal, p_logp
+method: [original] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, (cr), cr_feature, da, contrastive_temporal, p_logp
 temp: 2.5 # temperature smoothing
-em_coef: 1
+em_coef: 0
 div_coef: 0
-num_augs: 3
+num_augs: 2
 aug_method: augmix # augmix, standard
 not_blank: true
 reweight: true
@@ -54,4 +54,4 @@ n_neighbors: 6
 device: cuda
 
 # logging
-log_dir: exps/test
+log_dir: exps/attention_mcc

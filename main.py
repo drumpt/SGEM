@@ -464,46 +464,27 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
 
     optimizer.zero_grad()
     if "original" in args.method or "em_uncertainty" in args.method or "em_sparse" in args.method:
-        # for wav in wavs:
-        #     wav = wav.unsqueeze(0)
-        #     log_probs_lst = forward_attn(args, model, greedy_searcher, wav)
-        #     log_prob_tensor = torch.stack(log_probs_lst, dim=1)
-        #     predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
-        #     non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
+        for wav in wavs:
+            wav = wav.unsqueeze(0)
+            log_probs_lst = forward_attn(args, model, greedy_searcher, wav)
+            log_prob_tensor = torch.stack(log_probs_lst, dim=1)
+            predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
+            non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
 
-        #     if args.em_coef > 0:
-        #         if "original" in args.method:
-        #             e_loss = softmax_entropy(log_prob_tensor / args.temp, dim=-1)[non_blank].mean(0).mean()
-        #         elif "em_uncertainty" in  args.method:
-        #             frame_weight = F.normalize(torch.reciprocal(softmax_entropy(log_prob_tensor)), p=1, dim=-1).detach()
-        #             e_loss = torch.sum(frame_weight * softmax_entropy(log_prob_tensor / args.temp), dim=-1).mean()
-        #         elif "em_sparse" in args.method:
-        #             selected_frame = torch.where(softmax_entropy(log_prob_tensor, dim=-1) < args.entropy_threshold, 1, 0).bool()
-        #             e_loss = softmax_entropy(log_prob_tensor / args.temp)[selected_frame].mean(0).mean()
-        #         (args.em_coef / len(wavs) * e_loss).backward()
+            if args.em_coef > 0:
+                if "original" in args.method:
+                    e_loss = softmax_entropy(log_prob_tensor / args.temp, dim=-1)[non_blank].mean(0).mean()
+                elif "em_uncertainty" in  args.method:
+                    frame_weight = F.normalize(torch.reciprocal(softmax_entropy(log_prob_tensor)), p=1, dim=-1).detach()
+                    e_loss = torch.sum(frame_weight * softmax_entropy(log_prob_tensor / args.temp), dim=-1).mean()
+                elif "em_sparse" in args.method:
+                    selected_frame = torch.where(softmax_entropy(log_prob_tensor, dim=-1) < args.entropy_threshold, 1, 0).bool()
+                    e_loss = softmax_entropy(log_prob_tensor / args.temp)[selected_frame].mean(0).mean()
+                (args.em_coef / len(wavs) * e_loss).backward()
 
-        #     if 1 - args.em_coef > 0:
-        #         c_loss = mcc_loss(log_prob_tensor / args.temp, reweight=args.reweight, class_num=1000)
-        #         ((1 - args.em_coef) / len(wavs) * c_loss).backward()
-        log_probs_lst = forward_attn(args, model, greedy_searcher, wavs)
-        log_prob_tensor = torch.stack(log_probs_lst, dim=1)
-        predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
-        non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
-
-        if args.em_coef > 0:
-            if "original" in args.method:
-                e_loss = softmax_entropy(log_prob_tensor / args.temp, dim=-1)[non_blank].mean(0).mean()
-            elif "em_uncertainty" in  args.method:
-                frame_weight = F.normalize(torch.reciprocal(softmax_entropy(log_prob_tensor)), p=1, dim=-1).detach()
-                e_loss = torch.sum(frame_weight * softmax_entropy(log_prob_tensor / args.temp), dim=-1).mean()
-            elif "em_sparse" in args.method:
-                selected_frame = torch.where(softmax_entropy(log_prob_tensor, dim=-1) < args.entropy_threshold, 1, 0).bool()
-                e_loss = softmax_entropy(log_prob_tensor / args.temp)[selected_frame].mean(0).mean()
-            (args.em_coef * e_loss).backward(retain_graph=True)
-
-        if 1 - args.em_coef > 0:
-            c_loss = mcc_loss(log_prob_tensor / args.temp, reweight=args.reweight, class_num=1000)
-            ((1 - args.em_coef) * c_loss).backward(retain_graph=True)
+            if 1 - args.em_coef > 0:
+                c_loss = mcc_loss(log_prob_tensor / args.temp, reweight=args.reweight, class_num=1000)
+                ((1 - args.em_coef) / len(wavs) * c_loss).backward()
     if "cr" in args.method:
         weak_augmentation_list, strong_augmentation_list = get_augmentation(args)
         seq_loss = lambda x, y, z: speechbrain.nnet.losses.nll_loss(x, y, z, label_smoothing=0.1)
@@ -1070,7 +1051,7 @@ def main(args):
         original_model_state, original_optimizer_state, original_scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
     for batch_idx, batch in enumerate(dataset):
-        if batch_idx > 100:
+        if batch_idx >= 100:
             break
         lens, wavs, texts, _ = batch
         if not isinstance(model, Wav2Vec2ForCTC):
@@ -1081,9 +1062,6 @@ def main(args):
         gt_texts += texts
         ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
         ori_transcriptions += ori_transcription
-
-        print(f"list(texts) : {list(texts)}")
-        print(f"list(ori_transcription) : {list(ori_transcription)}")
         ori_wer = wer(list(texts), list(ori_transcription))
 
         logger.info(f"{batch_idx}/{len(dataset)}")
@@ -1142,7 +1120,7 @@ def main(args):
                 with torch.no_grad():
                     teacher_param.copy_(momentum * teacher_param + (1 - momentum) * model_param)
 
-        logger.info("\n\n\n")
+        logger.info("\n")
 
     logger.info(OmegaConf.to_yaml(args))
     logger.info(f"number of data : {len(dataset)}")
