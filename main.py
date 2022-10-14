@@ -1074,9 +1074,6 @@ def main(args):
             else:
                 model, optimizer, scheduler = load_model_and_optimizer(model, optimizer, scheduler, original_model_state, original_optimizer_state, original_scheduler_state)
 
-        logger.info(f"ground truth : {list(texts)}")
-        logger.info(f"original transcrption : {list(ori_transcription)}")
-
         if "da" in args.method:
             adapter = nn.Linear(in_features=128, out_features=128, bias=False).requires_grad_(True).to(args.device)
             optimizer.add_param_group({'params': [p for p in adapter.parameters()]})
