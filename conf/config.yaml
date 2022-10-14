@@ -15,7 +15,7 @@ dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/CHiME3
 split: [test-other]
 extra_noise: 0.01
 sample_rate: 16000
-batch_size: 32
+batch_size: 8
 
 # optimizer & train hyparameters
 optimizer: AdamW
