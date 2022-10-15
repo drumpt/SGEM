@@ -4,14 +4,14 @@ asr: speechbrain/asr-crdnn-rnnlm-librispeech
 # asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 
 # dataset
-dataset_name: librispeech
-dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/LibriSpeech
+# dataset_name: librispeech
+# dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/LibriSpeech
 # dataset_name: chime
 # dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/CHiME3
 # dataset_name: commonvoice
 # dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/cv-corpus-5.1-2020-06-22/en
-# dataset_name: ted
-# dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/TEDLIUM_release2/test
+dataset_name: ted
+dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/TEDLIUM_release2/test
 split: [test-other]
 extra_noise: 0.01
 sample_rate: 16000
@@ -27,9 +27,9 @@ bias_only: false
 episodic: true # load pretrained model for every batch
 
 # methods and hyperparameters
-method: [p_logp] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, (cr), cr_feature, da, contrastive_temporal, p_logp
+method: [original] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, (cr), cr_feature, da, contrastive_temporal, p_logp
 temp: 2.5 # temperature smoothing
-em_coef: 0
+em_coef: 1
 div_coef: 0
 num_augs: 2
 aug_method: augmix # augmix, standard
@@ -47,11 +47,11 @@ restore_prob: 0.01
 
 # memory queue
 use_memory_queue: false
-queue_size: 256
-n_neighbors: 6
+queue_size: 32
+n_neighbors: 4
 
 # device
 device: cuda
 
 # logging
-log_dir: exps/attention_p_logp_libri
+log_dir: exps/attention_em_ted

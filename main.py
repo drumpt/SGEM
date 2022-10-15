@@ -6,8 +6,6 @@ import pickle
 from datetime import datetime
 from copy import deepcopy
 import time
-# from grpc import RpcContext
-# from queue import Queue
 
 import numpy as np
 from sklearn.decomposition import PCA
