@@ -9,6 +9,9 @@ from copy import deepcopy
 import time
 from collections import deque
 
+import hydra
+from omegaconf import OmegaConf, open_dict
+
 import numpy as np
 from sklearn.decomposition import PCA
 import torch
@@ -22,21 +25,18 @@ from torch.nn.utils.rnn import pad_sequence
 from info_nce import InfoNCE
 
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+import speechbrain
 from speechbrain.pretrained import EncoderDecoderASR
 from speechbrain.lobes.augment import TimeDomainSpecAugment
 from speechbrain.decoders.seq2seq import S2SRNNGreedySearcher
-import speechbrain
-
 import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.parts.utils import rnnt_utils
 from nemo.collections.asr.losses.ctc import CTCLoss
 from nemo.collections.common.parts.rnn import label_collate
+
 from audio_augmentations import *
 import sentencepiece
-
 from jiwer import wer
-import hydra
-from omegaconf import OmegaConf, open_dict
 
 from data import load_dataset
 from forward import *
@@ -464,10 +464,17 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
 def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens, adapter=None, step_idx=None):
     greedy_searcher = S2SRNNGreedySearcher(model.mods.decoder.emb, model.mods.decoder.dec, model.mods.decoder.fc, **{"bos_index": model.mods.decoder.bos_index, "eos_index": model.mods.decoder.eos_index, "min_decode_ratio": model.mods.decoder.min_decode_ratio, "max_decode_ratio": model.mods.decoder.max_decode_ratio,},).to(args.device).train()
     optimizer.zero_grad()
+
+    current = time.time()
+
     if "original" in args.method or "em_uncertainty" in args.method or "em_sparse" in args.method:
         for wav in wavs:
             wav = wav.unsqueeze(0)
             log_probs_lst = forward_attn(args, model, greedy_searcher, wav)
+
+            print(f"7-1 : {time.time() - current}")
+            current = time.time()
+
             log_prob_tensor = torch.stack(log_probs_lst, dim=1)
             predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
             non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
@@ -482,6 +489,13 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
                     selected_frame = torch.where(softmax_entropy(log_prob_tensor, dim=-1) < args.entropy_threshold, 1, 0).bool()
                     e_loss = softmax_entropy(log_prob_tensor / args.temp)[selected_frame].mean(0).mean()
                 (args.em_coef / len(wavs) * e_loss).backward()
+
+                # print(f"(args.em_coef / len(wavs) * e_loss) : {(args.em_coef / len(wavs) * e_loss)}")
+                # print(f"model.require_grad : {model.require_grad}")
+                # grad_dic = {x[0]:x[1].data.grad for x in model.named_parameters()}
+                # for k, v in grad_dic.items():
+                #     print(f"{k} : {v}")
+                # for x in mode.named_parameters():
 
             if 1 - args.em_coef > 0:
                 c_loss = mcc_loss(log_prob_tensor / args.temp, reweight=args.reweight, class_num=1000)
@@ -654,7 +668,14 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
                 e_loss = - torch.sum(mean_prob * mean_log_prob, dim=-1).mean()
                 (e_loss / (len(wavs) * num_augs)).backward()
 
+    print(f"7-3 : {time.time() - current}")
+    current = time.time()
+
     optimizer.step()
+
+    print(f"7-4 : {time.time() - current}")
+    current = time.time()
+
     if scheduler is not None: 
         scheduler.step()
 
@@ -766,9 +787,7 @@ def main(args):
     original_model = get_model(args, original=True)
     model = get_model(args, original=False)
 
-    # TODO: related to cudnn
-    # freeze_norm_stats(original_model)
-    # freeze_norm_stats(model)
+    current = time.time()
 
     if isinstance(model, Wav2Vec2ForCTC): # ctc
         params, _ = collect_params_ctc(model, train_params, bias_only)
@@ -778,22 +797,35 @@ def main(args):
         params, _ = collect_params_trans(model, train_params, bias_only)
     optimizer, scheduler = get_optimizer(params, opt_name=args.optimizer, lr=lr, scheduler=args.scheduler)
 
+    print(f"1 : {time.time() - current}")
+    current = time.time()
+
     teacher_model = get_model(args, original=False) if teacher_student else None
     processor = Wav2Vec2Processor.from_pretrained(args.asr, sampling_rate=sample_rate, return_attention_mask=True) if isinstance(model, Wav2Vec2ForCTC) else None
 
     if episodic:
         original_model_state, original_optimizer_state, original_scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
+    print(f"2 : {time.time() - current}")
+    current = time.time()
+
+    # TODO: casuality
+    ori_wer_list, ada_wer_list, diff_wer_list, max_ent_list, avg_ent_list, max_ood_list, avg_ood_list = [], [], [], [], [], [], []
+
     for batch_idx, batch in enumerate(dataset):
-        if batch_idx >= 100:
-            break
         lens, wavs, texts, _ = batch
+
+        print(f"3 : {time.time() - current}")
+        current = time.time()
 
         if isinstance(model, Wav2Vec2ForCTC):
             wavs = processor(wavs, sampling_rate=16000, return_tensors="pt", padding="longest").input_values.to(args.device)
         else:
             wavs = pad_sequence([torch.from_numpy(wav) for wav in wavs], batch_first=True).to(args.device)
         lens = lens.to(args.device)
+
+        print(f"4 : {time.time() - current}")
+        current = time.time()
 
         if args.use_memory_queue:
             probs = []
@@ -816,6 +848,9 @@ def main(args):
         else:
             wavs_to_adapt = wavs
             lens_to_adapt = lens
+
+        print(f"5 : {time.time() - current}")
+        current = time.time()
 
         gt_texts += texts
         ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
@@ -847,12 +882,19 @@ def main(args):
             adapter = None
 
         for step_idx in range(1, steps + 1):
+
+            print(f"6 : {time.time() - current}")
+            current = time.time()
+
             if isinstance(model, Wav2Vec2ForCTC): # ctc
                 forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt)
             elif isinstance(model, EncoderDecoderASR): # attention-based encoder-decoder
                 forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt, adapter=adapter, step_idx=step_idx)
             elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel): # transducer
                 forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt)
+
+            print(f"6-1 : {time.time() - current}")
+            current = time.time()
 
             if step_idx in [1, 3, 5, 10, 20, 40]:
                 transcription = transcribe_batch(args, model, processor, wavs, lens)
@@ -863,8 +905,45 @@ def main(args):
                 logger.info(f"adapt-{step_idx} WER: {ada_wer}")
                 logger.info(f"adapt-{step_idx} text: {' '.join(list(transcription))}")
 
+            print(f"6-2 : {time.time() - current}")
+            current = time.time()
+
             gc.collect()
             torch.cuda.empty_cache()
+
+        # TODO: casuality
+        if args.use_memory_queue:
+            probs = probs.view(-1, probs.shape[-1])
+
+            per_token_entropy = - torch.sum(probs * torch.log(probs), dim=-1)
+            max_entropy, _ = torch.max(per_token_entropy, dim=0)
+            avg_entropy = torch.mean(per_token_entropy, dim=0)
+
+            per_token_ood, _ = torch.max(probs, dim=-1)
+            per_token_odd = - per_token_ood
+            max_ood, _ = torch.max(per_token_odd, dim=0)
+            avg_ood = torch.mean(per_token_odd, dim=0)
+
+            ori_wer_list.append(ori_wer)
+            ada_wer_list.append(ada_wer)
+            diff_wer_list.append(ada_wer - ori_wer)
+            max_ent_list.append(max_entropy.item())
+            avg_ent_list.append(avg_entropy.item())
+            max_ood_list.append(max_ood.item())
+            avg_ood_list.append(avg_ood.item())
+
+            import pandas as pd
+            write_dict = {
+                'ori_wer': ori_wer_list,
+                'ada_wer': ada_wer_list,
+                'diff_wer': diff_wer_list,
+                'max_ent': max_ent_list,
+                'avg_ent': avg_ent_list,
+                'max_ood': max_ood_list,
+                'avg_ood': avg_ood_list
+            }
+            df = pd.DataFrame(write_dict)
+            df.to_csv(f"casuality_{args.dataset_name}_{list(args.method)}.csv", index=False)
 
         if args.use_memory_queue:
             for wav, prob in zip(wavs, probs):
