@@ -4,30 +4,30 @@ asr: speechbrain/asr-crdnn-rnnlm-librispeech
 # asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 
 # dataset
-dataset_name: librispeech
-dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/LibriSpeech
+# dataset_name: librispeech
+# dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/LibriSpeech
 # dataset_name: chime
 # dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/CHiME3
 # dataset_name: commonvoice
 # dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/cv-corpus-5.1-2020-06-22/en
-# dataset_name: ted
-# dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/TEDLIUM_release2/test
+dataset_name: ted
+dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/TEDLIUM_release2/test
 split: [test-other]
 extra_noise: 0.01
 sample_rate: 16000
-batch_size: 4
+batch_size: 1
 
 # optimizer & train hyparameters
 optimizer: AdamW
 scheduler: null
-lr: 2e-6
-steps: 10
+lr: 5e-6
+steps: 3
 train_params: [all] # currently supported: all, feature, LN, linear(linear probing), da
 bias_only: false
 episodic: true # load pretrained model for every batch
 
 # methods & other hyperparameters
-method: [original] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, p_logp, cr, cr_feature, da, contrastive_temporal
+method: [em_joint] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, p_logp, cr, cr_feature, da, contrastive_temporal
 temp: 2.5 # temperature smoothing
 em_coef: 1
 div_coef: 0
@@ -38,9 +38,9 @@ reweight: true
 
 # memory queue
 use_memory_queue: true
-queue_method: latest # currently supported: random, latest, informative
-queue_size: 16
-n_neighbors: 3
+queue_method: similar # currently supported: random, latest, informative, similar
+queue_size: 32
+n_neighbors: 0
 
 prob_threshold: 0.9
 entropy_threshold: 0.05
@@ -55,4 +55,4 @@ restore_prob: 0.01
 device: cuda
 
 # logging
-log_dir: exps/attention_em_libri
+log_dir: exps/test
