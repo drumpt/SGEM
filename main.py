@@ -391,17 +391,27 @@ def get_instance_from_queue(args, method, wavs, probs):
         previous_instances = list(memory_queue)
         selected_instances = []
 
-        from matplotlib import pyplot
+        # from matplotlib import pyplot as plt
+        # entropy_list = []
+        # max_prob_list = []
+        # # TODO: remove (just for checking)
+        # for wav, prob in previous_instances:
+        #     print(f"prob.shape : {prob.shape}")
+        #     per_token_entropy = -torch.sum(prob * torch.log(prob), dim=-1)
+        #     for entropy in per_token_entropy:
+        #         entropy_list.append(entropy.detach().item())
+        #         print(f"entropy.detach().item() : {entropy.detach().item()}")
 
-        entropy_list = []
-        # TODO: remove (just for checking)
-        for wav, prob in previous_instances:
-            print(f"prob.shape : {prob.shape}")
-            per_token_entropy = -torch.sum(prob * torch.log(prob), dim=-1)
-            for entropy in per_token_entropy:
-                entropy_list.append(entropy.detach().item())
-        pyplot.plot(entropy_list)
-        pyplot.savefig("entropy_distribution.png")
+        #     per_token_max_prob, _ = torch.max(prob, dim=-1)
+        #     for max_prob in per_token_max_prob:
+        #         max_prob_list.append(max_prob)
+        # plt.clf()
+        # plt.hist(entropy_list, bins=200)
+        # plt.savefig("entropy_distribution.png")
+
+        # plt.clf()
+        # plt.hist(max_prob_list, bins=50)
+        # plt.savefig("max_prob_distribution.png")
 
         for wav, prob in previous_instances:
             mean_probs = torch.mean(prob, dim=0).to(wavs.device)
@@ -629,7 +639,20 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
             log_probs_lst = forward_attn(args, model, greedy_searcher, wav)
             log_prob_tensor = torch.stack(log_probs_lst, dim=1)
             max_log_probs, _ = torch.max(log_prob_tensor, dim=-1, keepdim=False)
+
+            if "certain_only" in args.method:
+                probs = torch.softmax(log_prob_tensor, dim=-1)
+                confidence, _ = torch.max(probs, dim=-1, keepdim=True)
+                selected_tokens = torch.where(confidence > args.prob_threshold, 1, 0).bool()
+                max_log_probs = selected_tokens * max_log_probs
+
+            if "not_blank" in args.method:
+                predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
+                non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
+                max_log_probs = non_blank * max_log_probs
+
             sum_log_probs = torch.sum(max_log_probs, dim=-1)
+
             nll_loss = - sum_log_probs.mean()
             (nll_loss / len(wavs)).backward()
     if "p_logp" in args.method:
