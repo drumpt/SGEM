@@ -5,13 +5,13 @@ asr: speechbrain/asr-crdnn-rnnlm-librispeech
 
 # dataset
 # dataset_name: librispeech
-# dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/LibriSpeech
-# dataset_name: chime
-# dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/CHiME3
+# dataset_dir: /home/server27/hdd/changhun_workspace/nfs-client/LibriSpeech
+dataset_name: chime
+dataset_dir: /home/server27/hdd/changhun_workspace/nfs-client/CHiME3
 # dataset_name: commonvoice
-# dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/cv-corpus-5.1-2020-06-22/en
-dataset_name: ted
-dataset_dir: /home/server28/ssd/changhun_workspace/nfs-client/TEDLIUM_release2/test
+# dataset_dir: /home/server27/hdd/changhun_workspace/nfs-client/cv-corpus-5.1-2020-06-22/en
+# dataset_name: ted
+# dataset_dir: /home/server27/hdd/changhun_workspace/nfs-client/TEDLIUM_release2/test
 split: [test-other]
 extra_noise: 0.01
 sample_rate: 16000
@@ -20,8 +20,8 @@ batch_size: 1
 # optimizer & train hyparameters
 optimizer: AdamW
 scheduler: null
-lr: 5e-6
-steps: 3
+lr: 2e-5
+steps: 1
 train_params: [all] # currently supported: all, feature, LN, linear(linear probing), da
 bias_only: false
 episodic: true # load pretrained model for every batch
@@ -37,17 +37,24 @@ not_blank: true
 reweight: true
 
 # memory queue
-use_memory_queue: true
-queue_method: similar # currently supported: random, latest, informative, similar
-queue_size: 32
+use_memory_queue: false
+queue_method: latest # currently supported: random, latest, informative, similar
+queue_size: 16
 n_neighbors: 0
 
+# selective adaptation
+selective_adaptation: true
+ood_threshold: -0.45
+
+# uncertainty aware entropy minimization
 prob_threshold: 0.9
 entropy_threshold: 0.05
 
+# teacher student model for non episodic adaptation
 teacher_student: false
 momentum: 0.99
 
+# restore pretrained model for non episodic adaptation
 stochastic_restoration: false
 restore_prob: 0.01
 
