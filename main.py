@@ -362,7 +362,9 @@ def generate_adversarial_example(wavs, model, target_snr=15, lr=1e-4, n_steps=5)
 
 def get_instance_from_queue(args, method, wavs, probs):
     out_wavs = [wav for wav in wavs]
-    if len(memory_queue) <= args.n_neighbors:
+    if args.n_neighbors <= 0:
+        pass
+    elif len(memory_queue) <= args.n_neighbors:
         for wav, _ in list(memory_queue):
             out_wavs.append(wav.to(wavs.device))
     elif method == "random":
@@ -377,12 +379,13 @@ def get_instance_from_queue(args, method, wavs, probs):
         new_mean_probs = torch.mean(probs.view(-1, probs.shape[-1]), dim=0)
         previous_instances = list(memory_queue)
         selected_instances = []
-
         for wav, prob in previous_instances:
             entropy = torch.mean(- torch.sum(prob * torch.log(prob), dim=-1)) # mean over tokens
             mean_probs = torch.mean(prob, dim=0).to(wavs.device)
             js_div = js_divergence(new_mean_probs, mean_probs)
             selected_instances.append((wav, entropy / js_div))
+
+        print(f"args.n_neighbors : {args.n_neighbors}")
 
         for wav, _ in sorted(selected_instances, key=lambda x: x[1], reverse=True)[:args.n_neighbors]:
             out_wavs.append(wav.to(wavs.device))
@@ -632,6 +635,60 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
             sum_log_probs = torch.sum(max_log_probs, dim=-1)
             nll_loss = - sum_log_probs.mean()
             (nll_loss / len(wavs)).backward()
+
+            # import pickle, shelve, json
+
+            # current = time.time()
+            # grad_dict = dict()
+            # for np, p in model.named_parameters():
+            #     grad_dict[np] = p.grad
+
+            # print(f"get_gradient 1 : {time.time() - current}")
+            # current = time.time()
+
+            # # with open("grad_example.pkl", "wb") as f:
+            # #     pickle.dump(grad_dict, f, pickle.HIGHEST_PROTOCOL)
+
+            # db = shelve.open("grad_example.pkl", writeback=True)
+            # db['grad'] = grad_dict
+
+            # # db = tshelve.open("grad_example.pkl", writeback=False)
+
+            # # with open("grad_example.json", "wt") as f:
+            # #     json.dump(grad_dict, f)
+
+            # # torch.save(grad_dict, "grad_example.pkl")
+
+            # # open("grad_example.pkl", "w").write(grad_dict)
+
+            # print(f"save_gradient : {time.time() - current}")
+            # current = time.time()
+
+            # # with open("grad_example.pkl", "rb") as f:
+            # #     new_grad_dict = pickle.load(f)
+
+            # new_grad_dict = db['grad']
+
+            # # with open("grad_example.pkl", "r") as f:
+            # #     new_grad_dict = f.read()
+
+            # # with open("grad_example.json", "rt") as f:
+            # #     new_grad_dict = json.load(grad_dict, f)
+
+            # # new_grad_dict = torch.load(grad_dict, "grad_example.pkl")
+
+            # print(f"load_gradient : {time.time() - current}")
+            # current = time.time()
+
+            # for np, p in model.named_parameters():
+            #     if new_grad_dict[np] != None:
+            #         p.grad = new_grad_dict[np].to(args.device)
+            #     else:
+            #         p.grad = None
+
+            # print(f"apply_gradient : {time.time() - current}")
+            # current = time.time()
+
     if "p_logp" in args.method:
         for wav in wavs:
             wav = wav.unsqueeze(0)
@@ -851,7 +908,8 @@ def main(args):
         print(f"4 : {time.time() - current}")
         current = time.time()
 
-        if args.use_memory_queue:
+        adapt_or_not = True
+        if args.use_memory_queue or args.selective_adaptation:
             probs = []
             for i, wav in enumerate(wavs):
                 wav = wav.unsqueeze(0)
@@ -866,10 +924,21 @@ def main(args):
                     logit = torch.stack(logit, dim=1)
             probs.append(torch.softmax(logit.squeeze(0), dim=-1))
             probs = pad_sequence(probs, batch_first=True).to(args.device)
-            print(f"probs.shape in main : {probs.shape}")
-            
-            wavs_to_adapt = get_instance_from_queue(args, args.queue_method, wavs, probs)
-            lens_to_adapt = torch.tensor([len(wav) for wav in wavs_to_adapt]).to(args.device)
+
+            if args.selective_adaptation:
+                per_token_ood, _ = torch.max(probs, dim=-1)
+                per_token_odd = - per_token_ood
+                max_ood, _ = torch.max(per_token_odd, dim=-1) # max_ood per each instance
+                avg_max_ood = torch.mean(max_ood, dim=-1) # average max_ood per batch
+                if avg_max_ood < args.ood_threshold:
+                    adapt_or_not = False
+
+            if args.use_memory_queue:
+                wavs_to_adapt = get_instance_from_queue(args, args.queue_method, wavs, probs)
+                lens_to_adapt = torch.tensor([len(wav) for wav in wavs_to_adapt]).to(args.device)
+            else:
+                wavs_to_adapt = wavs
+                lens_to_adapt = lens
         else:
             wavs_to_adapt = wavs
             lens_to_adapt = lens
@@ -907,16 +976,17 @@ def main(args):
             adapter = None
 
         for step_idx in range(1, steps + 1):
-
             print(f"6 : {time.time() - current}")
             current = time.time()
 
-            if isinstance(model, Wav2Vec2ForCTC): # ctc
-                forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt)
-            elif isinstance(model, EncoderDecoderASR): # attention-based encoder-decoder
-                forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt, adapter=adapter, step_idx=step_idx)
-            elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel): # transducer
-                forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt)
+            print(f"adapt_or_not : {adapt_or_not}")
+            if adapt_or_not:
+                if isinstance(model, Wav2Vec2ForCTC): # ctc
+                    forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt)
+                elif isinstance(model, EncoderDecoderASR): # attention-based encoder-decoder
+                    forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt, adapter=adapter, step_idx=step_idx)
+                elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel): # transducer
+                    forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt)
 
             print(f"6-1 : {time.time() - current}")
             current = time.time()
@@ -937,40 +1007,40 @@ def main(args):
             torch.cuda.empty_cache()
 
         # TODO: casuality
-        if args.use_memory_queue:
-            probs_for_new = probs.clone().view(-1, probs.shape[-1])
+        # if args.use_memory_queue:
+        #     probs_for_new = probs.clone().view(-1, probs.shape[-1])
 
-            per_token_entropy = - torch.sum(probs_for_new * torch.log(probs_for_new), dim=-1)
-            max_entropy, _ = torch.max(per_token_entropy, dim=0)
-            avg_entropy = torch.mean(per_token_entropy, dim=0)
+        #     per_token_entropy = - torch.sum(probs_for_new * torch.log(probs_for_new), dim=-1)
+        #     max_entropy, _ = torch.max(per_token_entropy, dim=-1)
+        #     avg_entropy = torch.mean(per_token_entropy, dim=-1)
 
-            per_token_ood, _ = torch.max(probs_for_new, dim=-1)
-            per_token_odd = - per_token_ood
-            max_ood, _ = torch.max(per_token_odd, dim=0)
-            avg_ood = torch.mean(per_token_odd, dim=0)
+        #     per_token_ood, _ = torch.max(probs_for_new, dim=-1)
+        #     per_token_odd = - per_token_ood
+        #     max_ood, _ = torch.max(per_token_odd, dim=-1)
+        #     avg_ood = torch.mean(per_token_odd, dim=-1)
 
-            ori_wer_list.append(ori_wer)
-            ada_wer_list.append(ada_wer)
-            diff_wer_list.append(ada_wer - ori_wer)
-            max_ent_list.append(max_entropy.item())
-            avg_ent_list.append(avg_entropy.item())
-            max_ood_list.append(max_ood.item())
-            avg_ood_list.append(avg_ood.item())
+        #     ori_wer_list.append(ori_wer)
+        #     ada_wer_list.append(ada_wer)
+        #     diff_wer_list.append(ada_wer - ori_wer)
+        #     max_ent_list.append(max_entropy.item())
+        #     avg_ent_list.append(avg_entropy.item())
+        #     max_ood_list.append(max_ood.item())
+        #     avg_ood_list.append(avg_ood.item())
 
-            import pandas as pd
-            write_dict = {
-                'ori_wer': ori_wer_list,
-                'ada_wer': ada_wer_list,
-                'diff_wer': diff_wer_list,
-                'max_ent': max_ent_list,
-                'avg_ent': avg_ent_list,
-                'max_ood': max_ood_list,
-                'avg_ood': avg_ood_list
-            }
-            df = pd.DataFrame(write_dict)
-            df.to_csv(f"casuality_{args.dataset_name}_{list(args.method)}.csv", index=False)
+        #     import pandas as pd
+        #     write_dict = {
+        #         'ori_wer': ori_wer_list,
+        #         'ada_wer': ada_wer_list,
+        #         'diff_wer': diff_wer_list,
+        #         'max_ent': max_ent_list,
+        #         'avg_ent': avg_ent_list,
+        #         'max_ood': max_ood_list,
+        #         'avg_ood': avg_ood_list
+        #     }
+        #     df = pd.DataFrame(write_dict)
+        #     df.to_csv(f"casuality_{args.dataset_name}_{list(args.method)}.csv", index=False)
 
-        if args.use_memory_queue:
+        if args.use_memory_queue and adapt_or_not:
             for wav, prob in zip(wavs, probs):
                 while len(memory_queue) >= args.queue_size:
                     memory_queue.popleft()
