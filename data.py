@@ -45,7 +45,7 @@ def collect_audio_batch(batch, extra_noise=0., maxLen=600000):
     return torch.tensor(audio_len), audio_feat, text, file
 
 
-def create_dataset(split, name, path, batch_size=1):
+def create_dataset(split, name, path, batch_size=1, noise_type=None):
     ''' Interface for creating all kinds of dataset'''
 
     # Recognize corpus
@@ -57,20 +57,26 @@ def create_dataset(split, name, path, batch_size=1):
         from corpus.ted import TedDataset as Dataset
     elif name.lower() == "commonvoice":
         from corpus.commonvoice import CVDataset as Dataset
-        
+    elif name.lower() == "valentini":
+        from corpus.valentini import ValDataset as Dataset
+
     else:
         raise NotImplementedError
 
     loader_bs = batch_size
-    dataset = Dataset(split, batch_size, path)
+    if name.lower() == "librispeech":
+        dataset = Dataset(split, batch_size, path, noise_type=noise_type)
+    else:
+        dataset = Dataset(split, batch_size, path)
+
     print(f'[INFO]    There are {len(dataset)} samples.')
 
     return dataset, loader_bs
 
 
-def load_dataset(split=None, name='librispeech', path=None, batch_size=1, extra_noise=0., num_workers=4):
+def load_dataset(split=None, name='librispeech', path=None, batch_size=1, extra_noise=0., noise_type=None, num_workers=4):
     ''' Prepare dataloader for training/validation'''
-    dataset, loader_bs = create_dataset(split, name, path, batch_size)
+    dataset, loader_bs = create_dataset(split, name, path, batch_size, noise_type=noise_type)
     if name=="librispeech":
         collate_fn = partial(collect_audio_batch, extra_noise=extra_noise)
     else:
@@ -78,6 +84,4 @@ def load_dataset(split=None, name='librispeech', path=None, batch_size=1, extra_
 
     dataloader = DataLoader(dataset, batch_size=loader_bs, shuffle=False,
                             collate_fn=collate_fn, num_workers=num_workers)
-    # dataloader = DataLoader(dataset, batch_size=loader_bs, shuffle=True,
-    #                         collate_fn=collate_fn, num_workers=num_workers)
     return dataloader
