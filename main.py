@@ -6,8 +6,7 @@ import pickle
 from datetime import datetime
 from copy import deepcopy
 import time
-# from grpc import RpcContext
-# from queue import Queue
+from queue import Queue
 
 import numpy as np
 from sklearn.decomposition import PCA
@@ -24,7 +23,6 @@ from speechbrain.pretrained import EncoderDecoderASR
 from speechbrain.lobes.augment import TimeDomainSpecAugment
 from speechbrain.decoders.seq2seq import S2SRNNGreedySearcher
 import speechbrain
-
 import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.parts.utils import rnnt_utils
 from nemo.collections.asr.losses.ctc import CTCLoss
@@ -1016,12 +1014,11 @@ def main(args):
     stochastic_restoration = args.stochastic_restoration
     restore_prob = args.restore_prob
 
-    # TODO: implement memory queue
-    # use_memory_queue = args.use_memory_queue
-    # queue_size = args.queue_size
-    # n_neighbors = args.n_neighbors
-    # if use_memory_queue:
-    #     memory_queue = Queue(maxsize=queue_size)
+    use_memory_queue = args.use_memory_queue
+    queue_size = args.queue_size
+    n_neighbors = args.n_neighbors
+    if use_memory_queue:
+        memory_queue = Queue(maxsize=queue_size)
 
     if not os.path.exists(args.log_dir):
         os.makedirs(args.log_dir)
