@@ -78,6 +78,4 @@ def load_dataset(split=None, name='librispeech', path=None, batch_size=1, extra_
 
     dataloader = DataLoader(dataset, batch_size=loader_bs, shuffle=False,
                             collate_fn=collate_fn, num_workers=num_workers)
-    # dataloader = DataLoader(dataset, batch_size=loader_bs, shuffle=True,
-    #                         collate_fn=collate_fn, num_workers=num_workers)
     return dataloader

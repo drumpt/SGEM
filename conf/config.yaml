@@ -7,7 +7,7 @@ asr: speechbrain/asr-crdnn-rnnlm-librispeech
 # dataset_name: librispeech
 # dataset_dir: /home/server17/hdd/changhun_workspace/LibriSpeech
 dataset_name: chime
-dataset_dir: /home/server17/hdd/changhun_workspace/CHiME3
+dataset_dir: /home/server34/hdd/changhun_workspace/nfs-client/CHiME3
 # dataset_name: commonvoice
 # dataset_dir: /home/server17/hdd/changhun_workspace/cv-corpus-5.1-2020-06-22/en
 # dataset_name: ted
@@ -15,7 +15,7 @@ dataset_dir: /home/server17/hdd/changhun_workspace/CHiME3
 split: [test-other]
 extra_noise: 0.01
 sample_rate: 16000
-batch_size: 4
+batch_size: 1
 
 # optimizer & train hyparameters
 optimizer: AdamW
@@ -46,9 +46,9 @@ stochastic_restoration: false
 restore_prob: 0.01
 
 # memory queue
-use_memory_queue: false
-queue_size: 256
-n_neighbors: 6
+use_memory_queue: true
+queue_size: 32
+n_neighbors: 4
 
 # device
 device: cuda
