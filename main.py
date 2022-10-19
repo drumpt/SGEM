@@ -402,42 +402,44 @@ def get_instance_from_queue(args, method, wavs, probs):
 
 
 def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens):
-    outputs = model(wavs).logits
-    predicted_ids = torch.argmax(outputs, dim=-1)
-    non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
-
     optimizer.zero_grad()
     if "original" in args.method or "em_uncertainty" in args.method or "em_sparse" in args.method:
-        if args.em_coef > 0:
-            if "original" in args.method:
-                if args.not_blank:
-                    e_loss = softmax_entropy(outputs / args.temp)[non_blank].mean(0).mean()
-                else: 
-                    e_loss = softmax_entropy(outputs / args.temp).mean(0).mean() 
-            elif "em_uncertainty" in args.method:
-                if args.not_blank:
-                    frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)[non_blank]), p=1, dim=-1).detach()
-                    e_loss = torch.sum(frame_weight * softmax_entropy(outputs / args.temp)[non_blank], dim=-1).mean()
-                else:
-                    frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)), dim=-1).detach()
-                    e_loss = torch.sum(frame_weight * softmax_entropy(outputs / args.temp), dim=-1).mean()
-            elif "em_sparse" in args.method:
-                if args.not_blank:
-                    selected_frame = non_blank & torch.where(softmax_entropy(outputs, dim=-1) < args.entropy_threshold, 1, 0).bool()
-                    e_loss = softmax_entropy(outputs / args.temp)[selected_frame].mean(0).mean()
-                else:
-                    selected_frame = torch.where(softmax_entropy(outputs, dim=-1) < args.entropy_threshold, 1, 0).bool()
-                    e_loss = softmax_entropy(outputs / args.temp)[selected_frame].mean(0).mean() 
-            (args.em_coef * e_loss).backward(retain_graph=True)
+        for wav in wavs:
+            wav = wav.unsqueeze(0)
+            outputs = model(wav).logits
+            predicted_ids = torch.argmax(outputs, dim=-1)
+            non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
 
-        if 1 - args.em_coef > 0:
-            c_loss = mcc_loss(outputs / args.temp, args.reweight)
-            ((1 - args.em_coef) * c_loss).backward(retain_graph=True)
+            if args.em_coef > 0:
+                if "original" in args.method:
+                    if args.not_blank:
+                        e_loss = softmax_entropy(outputs / args.temp)[non_blank].mean(0).mean()
+                    else: 
+                        e_loss = softmax_entropy(outputs / args.temp).mean(0).mean() 
+                elif "em_uncertainty" in args.method:
+                    if args.not_blank:
+                        frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)[non_blank]), p=1, dim=-1).detach()
+                        e_loss = torch.sum(frame_weight * softmax_entropy(outputs / args.temp)[non_blank], dim=-1).mean()
+                    else:
+                        frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)), dim=-1).detach()
+                        e_loss = torch.sum(frame_weight * softmax_entropy(outputs / args.temp), dim=-1).mean()
+                elif "em_sparse" in args.method:
+                    if args.not_blank:
+                        selected_frame = non_blank & torch.where(softmax_entropy(outputs, dim=-1) < args.entropy_threshold, 1, 0).bool()
+                        e_loss = softmax_entropy(outputs / args.temp)[selected_frame].mean(0).mean()
+                    else:
+                        selected_frame = torch.where(softmax_entropy(outputs, dim=-1) < args.entropy_threshold, 1, 0).bool()
+                        e_loss = softmax_entropy(outputs / args.temp)[selected_frame].mean(0).mean() 
+                (args.em_coef * e_loss).backward(retain_graph=True)
+
+            if 1 - args.em_coef > 0:
+                c_loss = mcc_loss(outputs / args.temp, args.reweight)
+                ((1 - args.em_coef) * c_loss).backward(retain_graph=True)
     if "cr" in args.method:
         weak_augmentation_list, strong_augmentation_list = get_augmentation(args)
 
         ce_loss = nn.CrossEntropyLoss()
-        for sub_wav in input_values: # element-wise iteration
+        for sub_wav in wavs: # element-wise iteration
             sub_wav = sub_wav.unsqueeze(0)
             weak_sub_wav = apply_augmentation(args, weak_augmentation_list, sub_wav).to(args.device)
 
@@ -463,9 +465,67 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
                 cr_loss = ce_loss(
                     strong_output * selected_frame,
                     (weak_one_hot * selected_frame).detach()
-                ) / (len(input_values) * len(strong_outputs))
+                ) / (len(wavs) * len(strong_outputs))
                 cr_loss.backward(retain_graph=True)
             del sub_wav, weak_sub_wav, weak_probs, confidence, weak_max_idx, non_blank, selected_frames, strong_sub_wav, strong_outputs
+    if "em_joint" in args.method:
+        for wav in wavs:
+            wav = wav.unsqueeze(0)
+            log_prob_tensor = model(wav).logits
+            max_log_probs, _ = torch.max(log_prob_tensor, dim=-1, keepdim=False)
+
+            if args.certain_only:
+                probs = torch.softmax(log_prob_tensor, dim=-1)
+                confidence, _ = torch.max(probs, dim=-1, keepdim=True)
+                selected_tokens = torch.where(confidence > args.prob_threshold, 1, 0).bool()
+                max_log_probs = selected_tokens * max_log_probs
+
+            if args.not_blank:
+                predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
+                non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
+                max_log_probs = non_blank * max_log_probs
+
+            sum_log_probs = torch.sum(max_log_probs, dim=-1)
+
+            nll_loss = - sum_log_probs.mean()
+            (nll_loss / len(wavs)).backward()
+
+    if args.use_memory_queue:
+        global memory_queue, HASH_COUNTER
+
+        # get current gradient
+        current_grad_dict = dict()
+        for np, p in model.named_parameters():
+            current_grad_dict[np] = p.grad if p.grad == None else p.grad.cpu().clone()
+
+        # search wavs to adapt
+        probs = torch.softmax(log_prob_tensor, dim=-1)
+        wavs_to_adapt, hash_values_to_adapt = get_instance_from_queue(args, args.queue_method, wavs, probs)
+
+        if len(hash_values_to_adapt) > 0:
+            grad_dict_list = [db[hash_value_to_adapt] for hash_value_to_adapt in hash_values_to_adapt]
+            cumulated_grad = dict()
+            for np, _ in model.named_parameters():
+                grads_np = [grad_dict[np] for grad_dict in grad_dict_list]
+                cumulated_grad[np] = sum(grads_np) if not None in grads_np else None
+
+            denominator = len(wavs) + len(hash_values_to_adapt)
+            for np, p in model.named_parameters():  
+                if p.grad == None:
+                    continue
+                p.grad = p.grad * len(wavs) / denominator + cumulated_grad[np].to(args.device) / denominator
+
+        for wav, prob in zip(wavs, probs):
+            # dequeue
+            while len(memory_queue) >= args.queue_size:
+                wav_to_remove, _, hash_value_to_remove = memory_queue.popleft()
+                del db[hash_value_to_remove]
+
+            # enqueue
+            hash_value = str(HASH_COUNTER)
+            memory_queue.append((wav.cpu().detach(), prob.cpu().detach(), hash_value))
+            db[hash_value] = current_grad_dict
+            HASH_COUNTER += 1
 
     optimizer.step()
     if scheduler is not None:
@@ -499,11 +559,11 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
                 elif "em_sparse" in args.method:
                     selected_frame = torch.where(softmax_entropy(log_prob_tensor, dim=-1) < args.entropy_threshold, 1, 0).bool()
                     e_loss = softmax_entropy(log_prob_tensor / args.temp)[selected_frame].mean(0).mean()
-                (args.em_coef / len(wavs) * e_loss).backward()
+                (args.em_coef / len(wavs) * e_loss).backward(retain_graph=True)
 
             if 1 - args.em_coef > 0:
                 c_loss = mcc_loss(log_prob_tensor / args.temp, reweight=args.reweight, class_num=1000)
-                ((1 - args.em_coef) / len(wavs) * c_loss).backward()
+                ((1 - args.em_coef) / len(wavs) * c_loss).backward(retain_graph=True)
     if "cr" in args.method:
         weak_augmentation_list, strong_augmentation_list = get_augmentation(args)
         seq_loss = lambda x, y, z: speechbrain.nnet.losses.nll_loss(x, y, z, label_smoothing=0.1)
@@ -609,7 +669,20 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
             log_probs_lst = forward_attn(args, model, greedy_searcher, wav)
             log_prob_tensor = torch.stack(log_probs_lst, dim=1)
             max_log_probs, _ = torch.max(log_prob_tensor, dim=-1, keepdim=False)
+
+            if args.certain_only:
+                probs = torch.softmax(log_prob_tensor, dim=-1)
+                confidence, _ = torch.max(probs, dim=-1, keepdim=True)
+                selected_tokens = torch.where(confidence > args.prob_threshold, 1, 0).bool()
+                max_log_probs = selected_tokens * max_log_probs
+
+            if args.not_blank:
+                predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
+                non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
+                max_log_probs = non_blank * max_log_probs
+
             sum_log_probs = torch.sum(max_log_probs, dim=-1)
+
             nll_loss = - sum_log_probs.mean()
             (nll_loss / len(wavs)).backward()
     if "p_logp" in args.method:
@@ -672,7 +745,6 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
                 e_loss = - torch.sum(mean_prob * mean_log_prob, dim=-1).mean()
                 (e_loss / (len(wavs) * num_augs)).backward()
     
-
     print(f"7-3 : {time.time() - current}")
     current = time.time()
 
@@ -726,7 +798,6 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
                 del db[hash_value_to_remove]
 
             # enqueue
-            # hash_value = str(hash(wav.detach().cpu()))
             hash_value = str(HASH_COUNTER)
             memory_queue.append((wav.cpu().detach(), prob.cpu().detach(), hash_value))
             db[hash_value] = current_grad_dict
@@ -760,11 +831,11 @@ def forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, sc
                 elif "em_sparse" in args.method:
                     selected_frame = torch.where(softmax_entropy(log_prob_tensor, dim=-1) < args.entropy_threshold, 1, 0).bool()
                     e_loss = softmax_entropy(log_prob_tensor / args.temp)[selected_frame].mean(0).mean()
-                ((args.em_coef / len(wavs)) * e_loss).backward()
+                ((args.em_coef / len(wavs)) * e_loss).backward(retain_graph=True)
 
             if 1 - args.em_coef > 0:
                 c_loss = mcc_loss(log_prob_tensor / args.temp, reweight=args.reweight, class_num=1000)
-                (((1 - args.em_coef) / len(wavs)) * c_loss).backward()
+                (((1 - args.em_coef) / len(wavs)) * c_loss).backward(retain_graph=True)
     if "cr" in args.method:
         weak_augmentation_list, strong_augmentation_list = get_augmentation(args)
         ctc_loss = CTCLoss(num_classes=1000)
@@ -804,6 +875,66 @@ def forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, sc
             target_lengths=torch.ones(len(strong_outputs)).to(args.device)
         )
         del strong_wavs, strong_outputs
+    if "em_joint" in args.method:
+        for i, wav in enumerate(wavs):
+            wav = wav.unsqueeze(0)
+            log_probs_lst = forward_trans(args, model, wav, torch.tensor([lens[i]]).to(wav.device), gt_wavs=None)
+            log_prob_tensor = torch.stack(log_probs_lst, dim=1)
+            max_log_probs, _ = torch.max(log_prob_tensor, dim=-1, keepdim=False)
+
+            if args.certain_only:
+                probs = torch.softmax(log_prob_tensor, dim=-1)
+                confidence, _ = torch.max(probs, dim=-1, keepdim=True)
+                selected_tokens = torch.where(confidence > args.prob_threshold, 1, 0).bool().detach()
+                max_log_probs = selected_tokens * max_log_probs
+
+            if args.not_blank:
+                predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
+                non_blank = torch.where(predicted_ids != model.decoding.decoding._blank_index, 1, 0).bool().detach()
+                max_log_probs = non_blank * max_log_probs
+
+            sum_log_probs = torch.sum(max_log_probs, dim=-1)
+
+            nll_loss = - sum_log_probs.mean()
+            (nll_loss / len(wavs)).backward()
+
+    if args.use_memory_queue:
+        print(f"args.use_memory_queue : {args.use_memory_queue}")
+        global memory_queue, HASH_COUNTER
+
+        # get current gradient
+        current_grad_dict = dict()
+        for np, p in model.named_parameters():
+            current_grad_dict[np] = p.grad if p.grad == None else p.grad.cpu().clone()
+
+        # search wavs to adapt
+        probs = torch.softmax(log_prob_tensor, dim=-1)
+        wavs_to_adapt, hash_values_to_adapt = get_instance_from_queue(args, args.queue_method, wavs, probs)
+
+        if len(hash_values_to_adapt) > 0:
+            grad_dict_list = [db[hash_value_to_adapt] for hash_value_to_adapt in hash_values_to_adapt]
+            cumulated_grad = dict()
+            for np, _ in model.named_parameters():
+                grads_np = [grad_dict[np] for grad_dict in grad_dict_list]
+                cumulated_grad[np] = sum(grads_np) if not None in grads_np else None
+
+            denominator = len(wavs) + len(hash_values_to_adapt)
+            for np, p in model.named_parameters():  
+                if p.grad == None:
+                    continue
+                p.grad = p.grad * len(wavs) / denominator + cumulated_grad[np].to(args.device) / denominator
+
+        for wav, prob in zip(wavs, probs):
+            # dequeue
+            while len(memory_queue) >= args.queue_size:
+                wav_to_remove, _, hash_value_to_remove = memory_queue.popleft()
+                del db[hash_value_to_remove]
+
+            # enqueue
+            hash_value = str(HASH_COUNTER)
+            memory_queue.append((wav.cpu().detach(), prob.cpu().detach(), hash_value))
+            db[hash_value] = current_grad_dict
+            HASH_COUNTER += 1
 
     optimizer.step()
     if scheduler is not None:
@@ -914,6 +1045,10 @@ def main(args):
                     elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
                         logit = forward_trans(args, model, wav, torch.tensor([lens[i]]).to(wav.device), gt_wavs=None)
                         logit = torch.stack(logit, dim=1)
+
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
                 probs.append(torch.softmax(logit.squeeze(0), dim=-1))
                 probs = pad_sequence(probs, batch_first=True).to(args.device)
                 per_token_ood, _ = torch.max(probs, dim=-1)
@@ -970,8 +1105,7 @@ def main(args):
         current = time.time()
 
         gt_texts += texts
-        with torch.no_grad():
-            ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
+        ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
         ori_transcriptions += ori_transcription
         ori_wer = wer(list(texts), list(ori_transcription))
 
@@ -1016,8 +1150,7 @@ def main(args):
             current = time.time()
 
             if step_idx in [1, 3, 5, 10, 20, 40]:
-                with torch.no_grad():
-                    transcription = transcribe_batch(args, model, processor, wavs, lens)
+                transcription = transcribe_batch(args, model, processor, wavs, lens)
                 transcription_list = eval(f"transcriptions_{step_idx}")
                 transcription_list += transcription
 
