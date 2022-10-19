@@ -11,6 +11,7 @@ traitlets
 ptyprocess
 pickleshare
 backcall
+ipython
 
 hydra-core==1.2.0
 hydra-colorlog==1.2.0
@@ -21,10 +22,9 @@ torch==1.11.0
 torchaudio
 
 transformers
-git+https://github.com/huggingface/transformers
 speechbrain
 nemo-toolkit
-pytorch-lightning==1.7.7
+pytorch-lightning==1.6.5
 
 audio_augmentations
 git+https://github.com/facebookresearch/WavAugment
