@@ -4,17 +4,15 @@ import random
 import gc
 import logging
 import pickle
+import shelve
 from datetime import datetime
 from copy import deepcopy
 import time
-<<<<<<< HEAD
-from queue import Queue
-=======
 from collections import deque
+import collections, functools, operator
 
 import hydra
 from omegaconf import OmegaConf, open_dict
->>>>>>> 7e6662726d826fce28b0f9f6a8323983a60e3227
 
 import numpy as np
 from sklearn.decomposition import PCA
@@ -33,10 +31,6 @@ import speechbrain
 from speechbrain.pretrained import EncoderDecoderASR
 from speechbrain.lobes.augment import TimeDomainSpecAugment
 from speechbrain.decoders.seq2seq import S2SRNNGreedySearcher
-<<<<<<< HEAD
-import speechbrain
-=======
->>>>>>> 7e6662726d826fce28b0f9f6a8323983a60e3227
 import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.parts.utils import rnnt_utils
 from nemo.collections.asr.losses.ctc import CTCLoss
@@ -72,6 +66,8 @@ def get_model(args, original):
     elif args.asr == "speechbrain/asr-crdnn-transformerlm-librispeech":
         model = EncoderDecoderASR.from_hparams(args.asr, run_opts={"device": args.device}).requires_grad_(True).eval()
     elif args.asr == "pretrained_models/stt_en_conformer_transducer_small.nemo":
+        model = nemo_asr.models.EncDecRNNTBPEModel.restore_from(args.asr).to(args.device).requires_grad_(True).eval()
+    elif args.asr == "pretrained_models/stt_en_conformer_transducer_large.nemo":
         model = nemo_asr.models.EncDecRNNTBPEModel.restore_from(args.asr).to(args.device).requires_grad_(True).eval()
     if original:
         model = configure_model(model)
@@ -217,8 +213,8 @@ def get_augmentation(args):
         HighLowPass(sample_rate=16000),
     ]
     strong_augmentation_list = [
-        Noise(min_snr=0.1, max_snr=0.5),
-        PitchShift(n_samples=16000, sample_rate=16000, pitch_cents_min=-700, pitch_cents_max=700),
+        Noise(min_snr=0.01, max_snr=0.05),
+        # PitchShift(n_samples=16000, sample_rate=16000, pitch_cents_min=-700, pitch_cents_max=700),
         TimeDomainSpecAugment(
             perturb_prob=0, drop_freq_prob=1, drop_chunk_prob=1, speeds=[95, 100, 105],
             drop_freq_count_low=3, drop_freq_count_high=5, drop_chunk_count_low=3, drop_chunk_count_high=5,
@@ -248,7 +244,7 @@ def apply_augmix(args, augmentation_list, wavs, k=3, alpha=1.0):
         for _ in range(num_augs):
             augmentation = np.random.choice(augmentation_list)
             if isinstance(augmentation, TimeDomainSpecAugment):
-                wavs_aug = augmentation(wavs_aug, torch.ones(len(wavs)))
+                wavs_aug = augmentation(wavs_aug, torch.ones(len(wavs_aug)))
             else:
                 wavs_aug = augmentation(wavs_aug.cpu())
         wavs_augmix += w_list[i] * wavs_aug.to(wavs.device)
@@ -369,106 +365,83 @@ def generate_adversarial_example(wavs, model, target_snr=15, lr=1e-4, n_steps=5)
 
 
 def get_instance_from_queue(args, method, wavs, probs):
-    out_wavs = [wav for wav in wavs]
-    if len(memory_queue) <= args.n_neighbors:
-        for wav, _ in list(memory_queue):
-            out_wavs.append(wav.to(wavs.device))
+    out_wavs, out_hash_values = [], []
+    if args.n_neighbors <= 0:
+        selected_instances = []
+    elif len(memory_queue) <= args.n_neighbors:
+        selected_instances = list(memory_queue)
     elif method == "random":
         selected_instances = random.sample(list(memory_queue), args.n_neighbors)
-        for wav, _ in selected_instances:
-            out_wavs.append(wav.to(wavs.device))
     elif method == "latest":
         selected_instances = list(memory_queue)[-args.n_neighbors:]
-        for wav, _ in selected_instances:
-            out_wavs.append(wav.to(wavs.device))
     elif method == "informative":
         new_mean_probs = torch.mean(probs.view(-1, probs.shape[-1]), dim=0)
         previous_instances = list(memory_queue)
         selected_instances = []
-
-        for wav, prob in previous_instances:
+        for wav, prob, hash_value in previous_instances:
             entropy = torch.mean(- torch.sum(prob * torch.log(prob), dim=-1)) # mean over tokens
             mean_probs = torch.mean(prob, dim=0).to(wavs.device)
             js_div = js_divergence(new_mean_probs, mean_probs)
-            selected_instances.append((wav, entropy / js_div))
-
-        for wav, _ in sorted(selected_instances, key=lambda x: x[1], reverse=True)[:args.n_neighbors]:
-            out_wavs.append(wav.to(wavs.device))
+            selected_instances.append((wav, entropy / js_div, hash_value))
+        selected_instances = sorted(selected_instances, key=lambda x: x[1], reverse=True)[:args.n_neighbors]
     elif method == "similar":
         new_mean_probs = torch.mean(probs.view(-1, probs.shape[-1]), dim=0)
         previous_instances = list(memory_queue)
         selected_instances = []
-
-        # from matplotlib import pyplot as plt
-        # entropy_list = []
-        # max_prob_list = []
-        # # TODO: remove (just for checking)
-        # for wav, prob in previous_instances:
-        #     print(f"prob.shape : {prob.shape}")
-        #     per_token_entropy = -torch.sum(prob * torch.log(prob), dim=-1)
-        #     for entropy in per_token_entropy:
-        #         entropy_list.append(entropy.detach().item())
-        #         print(f"entropy.detach().item() : {entropy.detach().item()}")
-
-        #     per_token_max_prob, _ = torch.max(prob, dim=-1)
-        #     for max_prob in per_token_max_prob:
-        #         max_prob_list.append(max_prob)
-        # plt.clf()
-        # plt.hist(entropy_list, bins=200)
-        # plt.savefig("entropy_distribution.png")
-
-        # plt.clf()
-        # plt.hist(max_prob_list, bins=50)
-        # plt.savefig("max_prob_distribution.png")
-
-        for wav, prob in previous_instances:
+        for wav, prob, hash_value in previous_instances:
             mean_probs = torch.mean(prob, dim=0).to(wavs.device)
             js_div = js_divergence(new_mean_probs, mean_probs)
-            selected_instances.append((wav, 1 / js_div))
+            selected_instances.append((wav, 1 / js_div, hash_value))
+        selected_instances = sorted(selected_instances, key=lambda x: x[1], reverse=True)[:args.n_neighbors]
 
-        for wav, _ in sorted(selected_instances, key=lambda x: x[1], reverse=True)[:args.n_neighbors]:
-            out_wavs.append(wav.to(wavs.device))
+    for wav, _, hash_value in selected_instances:
+        out_wavs.append(wav.to(wavs.device))
+        out_hash_values.append(hash_value)
 
-    out_wavs = pad_sequence(out_wavs, batch_first=True)
-    return out_wavs
+    if len(out_wavs) > 0:
+        out_wavs = pad_sequence(out_wavs, batch_first=True)
+    return out_wavs, out_hash_values
+
 
 def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens):
-    outputs = model(wavs).logits
-    predicted_ids = torch.argmax(outputs, dim=-1)
-    non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
-
     optimizer.zero_grad()
     if "original" in args.method or "em_uncertainty" in args.method or "em_sparse" in args.method:
-        if args.em_coef > 0:
-            if "original" in args.method:
-                if args.not_blank:
-                    e_loss = softmax_entropy(outputs / args.temp)[non_blank].mean(0).mean()
-                else: 
-                    e_loss = softmax_entropy(outputs / args.temp).mean(0).mean() 
-            elif "em_uncertainty" in args.method:
-                if args.not_blank:
-                    frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)[non_blank]), p=1, dim=-1).detach()
-                    e_loss = torch.sum(frame_weight * softmax_entropy(outputs / args.temp)[non_blank], dim=-1).mean()
-                else:
-                    frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)), dim=-1).detach()
-                    e_loss = torch.sum(frame_weight * softmax_entropy(outputs / args.temp), dim=-1).mean()
-            elif "em_sparse" in args.method:
-                if args.not_blank:
-                    selected_frame = non_blank & torch.where(softmax_entropy(outputs, dim=-1) < args.entropy_threshold, 1, 0).bool()
-                    e_loss = softmax_entropy(outputs / args.temp)[selected_frame].mean(0).mean()
-                else:
-                    selected_frame = torch.where(softmax_entropy(outputs, dim=-1) < args.entropy_threshold, 1, 0).bool()
-                    e_loss = softmax_entropy(outputs / args.temp)[selected_frame].mean(0).mean() 
-            (args.em_coef * e_loss).backward(retain_graph=True)
+        for wav in wavs:
+            wav = wav.unsqueeze(0)
+            outputs = model(wav).logits
+            predicted_ids = torch.argmax(outputs, dim=-1)
+            non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
 
-        if 1 - args.em_coef > 0:
-            c_loss = mcc_loss(outputs / args.temp, args.reweight)
-            ((1 - args.em_coef) * c_loss).backward(retain_graph=True)
+            if args.em_coef > 0:
+                if "original" in args.method:
+                    if args.not_blank:
+                        e_loss = softmax_entropy(outputs / args.temp)[non_blank].mean(0).mean()
+                    else: 
+                        e_loss = softmax_entropy(outputs / args.temp).mean(0).mean() 
+                elif "em_uncertainty" in args.method:
+                    if args.not_blank:
+                        frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)[non_blank]), p=1, dim=-1).detach()
+                        e_loss = torch.sum(frame_weight * softmax_entropy(outputs / args.temp)[non_blank], dim=-1).mean()
+                    else:
+                        frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)), dim=-1).detach()
+                        e_loss = torch.sum(frame_weight * softmax_entropy(outputs / args.temp), dim=-1).mean()
+                elif "em_sparse" in args.method:
+                    if args.not_blank:
+                        selected_frame = non_blank & torch.where(softmax_entropy(outputs, dim=-1) < args.entropy_threshold, 1, 0).bool()
+                        e_loss = softmax_entropy(outputs / args.temp)[selected_frame].mean(0).mean()
+                    else:
+                        selected_frame = torch.where(softmax_entropy(outputs, dim=-1) < args.entropy_threshold, 1, 0).bool()
+                        e_loss = softmax_entropy(outputs / args.temp)[selected_frame].mean(0).mean() 
+                (args.em_coef * e_loss).backward(retain_graph=True)
+
+            if 1 - args.em_coef > 0:
+                c_loss = mcc_loss(outputs / args.temp, args.reweight)
+                ((1 - args.em_coef) * c_loss).backward(retain_graph=True)
     if "cr" in args.method:
         weak_augmentation_list, strong_augmentation_list = get_augmentation(args)
 
         ce_loss = nn.CrossEntropyLoss()
-        for sub_wav in input_values: # element-wise iteration
+        for sub_wav in wavs: # element-wise iteration
             sub_wav = sub_wav.unsqueeze(0)
             weak_sub_wav = apply_augmentation(args, weak_augmentation_list, sub_wav).to(args.device)
 
@@ -494,9 +467,67 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
                 cr_loss = ce_loss(
                     strong_output * selected_frame,
                     (weak_one_hot * selected_frame).detach()
-                ) / (len(input_values) * len(strong_outputs))
+                ) / (len(wavs) * len(strong_outputs))
                 cr_loss.backward(retain_graph=True)
             del sub_wav, weak_sub_wav, weak_probs, confidence, weak_max_idx, non_blank, selected_frames, strong_sub_wav, strong_outputs
+    if "em_joint" in args.method:
+        for wav in wavs:
+            wav = wav.unsqueeze(0)
+            log_prob_tensor = model(wav).logits
+            max_log_probs, _ = torch.max(log_prob_tensor, dim=-1, keepdim=False)
+
+            if args.certain_only:
+                probs = torch.softmax(log_prob_tensor, dim=-1)
+                confidence, _ = torch.max(probs, dim=-1, keepdim=True)
+                selected_tokens = torch.where(confidence > args.prob_threshold, 1, 0).bool()
+                max_log_probs = selected_tokens * max_log_probs
+
+            if args.not_blank:
+                predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
+                non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
+                max_log_probs = non_blank * max_log_probs
+
+            sum_log_probs = torch.sum(max_log_probs, dim=-1)
+
+            nll_loss = - sum_log_probs.mean()
+            (nll_loss / len(wavs)).backward()
+
+    if args.use_memory_queue:
+        global memory_queue, HASH_COUNTER
+
+        # get current gradient
+        current_grad_dict = dict()
+        for np, p in model.named_parameters():
+            current_grad_dict[np] = p.grad if p.grad == None else p.grad.cpu().clone()
+
+        # search wavs to adapt
+        probs = torch.softmax(log_prob_tensor, dim=-1)
+        wavs_to_adapt, hash_values_to_adapt = get_instance_from_queue(args, args.queue_method, wavs, probs)
+
+        if len(hash_values_to_adapt) > 0:
+            grad_dict_list = [db[hash_value_to_adapt] for hash_value_to_adapt in hash_values_to_adapt]
+            cumulated_grad = dict()
+            for np, _ in model.named_parameters():
+                grads_np = [grad_dict[np] for grad_dict in grad_dict_list]
+                cumulated_grad[np] = sum(grads_np) if not None in grads_np else None
+
+            denominator = len(wavs) + len(hash_values_to_adapt)
+            for np, p in model.named_parameters():  
+                if p.grad == None:
+                    continue
+                p.grad = p.grad * len(wavs) / denominator + cumulated_grad[np].to(args.device) / denominator
+
+        for wav, prob in zip(wavs, probs):
+            # dequeue
+            while len(memory_queue) >= args.queue_size:
+                wav_to_remove, _, hash_value_to_remove = memory_queue.popleft()
+                del db[hash_value_to_remove]
+
+            # enqueue
+            hash_value = str(HASH_COUNTER)
+            memory_queue.append((wav.cpu().detach(), prob.cpu().detach(), hash_value))
+            db[hash_value] = current_grad_dict
+            HASH_COUNTER += 1
 
     optimizer.step()
     if scheduler is not None:
@@ -530,18 +561,11 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
                 elif "em_sparse" in args.method:
                     selected_frame = torch.where(softmax_entropy(log_prob_tensor, dim=-1) < args.entropy_threshold, 1, 0).bool()
                     e_loss = softmax_entropy(log_prob_tensor / args.temp)[selected_frame].mean(0).mean()
-                (args.em_coef / len(wavs) * e_loss).backward()
-
-                # print(f"(args.em_coef / len(wavs) * e_loss) : {(args.em_coef / len(wavs) * e_loss)}")
-                # print(f"model.require_grad : {model.require_grad}")
-                # grad_dic = {x[0]:x[1].data.grad for x in model.named_parameters()}
-                # for k, v in grad_dic.items():
-                #     print(f"{k} : {v}")
-                # for x in mode.named_parameters():
+                (args.em_coef / len(wavs) * e_loss).backward(retain_graph=True)
 
             if 1 - args.em_coef > 0:
                 c_loss = mcc_loss(log_prob_tensor / args.temp, reweight=args.reweight, class_num=1000)
-                ((1 - args.em_coef) / len(wavs) * c_loss).backward()
+                ((1 - args.em_coef) / len(wavs) * c_loss).backward(retain_graph=True)
     if "cr" in args.method:
         weak_augmentation_list, strong_augmentation_list = get_augmentation(args)
         seq_loss = lambda x, y, z: speechbrain.nnet.losses.nll_loss(x, y, z, label_smoothing=0.1)
@@ -581,34 +605,76 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
         cr_loss.backward()
     if "cr_feature" in args.method:
         weak_augmentation_list, strong_augmentation_list = get_augmentation(args)
+        l1_loss = nn.L1Loss()
 
-        for sub_wav in wavs:
-            sub_wav = sub_wav.unsqueeze(0)
-            weak_wavs = sub_wav.clone()
-            l1_loss = nn.L1Loss()
+        current = time.time()
 
-            with torch.no_grad():
-                if teacher_model:
-                    teacher_greedy_searcher = S2SRNNGreedySearcher(
-                        teacher_model.mods.decoder.emb,
-                        teacher_model.mods.decoder.dec,
-                        teacher_model.mods.decoder.fc,
-                        **{
-                            "bos_index": teacher_model.mods.decoder.bos_index,
-                            "eos_index": teacher_model.mods.decoder.eos_index,
-                            "min_decode_ratio": teacher_model.mods.decoder.min_decode_ratio,
-                            "max_decode_ratio": teacher_model.mods.decoder.max_decode_ratio,
-                        },
-                    ).to(args.device).train()
-                    weak_enc_states = teacher_model.encode_batch(weak_wavs, wav_lens=torch.ones(len(weak_wavs)).to(args.device))
-                else:
-                    weak_enc_states = model.encode_batch(weak_wavs, wav_lens=torch.ones(len(weak_wavs)).to(args.device))
+        for wav in wavs:
+            # sub_wav = sub_wav.unsqueeze(0)
+            # l1_loss = nn.L1Loss()
 
-            for _ in range(args.num_augs):
-                strong_wavs = apply_augmentation(args, strong_augmentation_list, sub_wav).to(args.device).clone()
-                strong_enc_states = model.encode_batch(strong_wavs, wav_lens=torch.ones(len(strong_wavs)).to(args.device))
-                cr_feature_loss = l1_loss(strong_enc_states, weak_enc_states.detach())
-                (cr_feature_loss / (args.num_augs * len(wavs))).backward()
+            # with torch.no_grad():
+            #     if teacher_model:
+            #         teacher_greedy_searcher = S2SRNNGreedySearcher(
+            #             teacher_model.mods.decoder.emb,
+            #             teacher_model.mods.decoder.dec,
+            #             teacher_model.mods.decoder.fc,
+            #             **{
+            #                 "bos_index": teacher_model.mods.decoder.bos_index,
+            #                 "eos_index": teacher_model.mods.decoder.eos_index,
+            #                 "min_decode_ratio": teacher_model.mods.decoder.min_decode_ratio,
+            #                 "max_decode_ratio": teacher_model.mods.decoder.max_decode_ratio,
+            #             },
+            #         ).to(args.device).train()
+            #         weak_enc_states = teacher_model.encode_batch(sub_wav, wav_lens=torch.ones(len(sub_wav)).to(args.device))
+            #     else:
+            #         weak_enc_states = model.encode_batch(sub_wav, wav_lens=torch.ones(len(sub_wav)).to(args.device))
+
+            # for _ in range(args.num_augs):
+            #     strong_wavs = apply_augmentation(args, strong_augmentation_list, sub_wav).to(args.device).clone()
+            #     strong_enc_states = model.encode_batch(strong_wavs, wav_lens=torch.ones(len(strong_wavs)).to(args.device))
+            #     cr_feature_loss = l1_loss(strong_enc_states, weak_enc_states.detach())
+            #     (cr_feature_loss / (args.num_augs * len(wavs))).backward()
+
+            # weak_enc_states = model.encode_batch(sub_wav, wav_lens=torch.ones(len(sub_wav)).to(args.device))
+            # strong_enc_states = []
+            # for _ in range(args.num_augs):
+            #     strong_wav = apply_augmentation(args, strong_augmentation_list, sub_wav).to(args.device).clone()
+            #     strong_enc_state = model.encode_batch(strong_wav, wav_lens=torch.ones(len(strong_wav)).to(args.device))
+            #     strong_enc_states.append(strong_enc_state.squeeze(0))
+            # strong_enc_states = torch.mean(torch.stack(strong_enc_states), dim=0, keepdim=True)
+            # cr_feature_loss = l1_loss(weak_enc_states, strong_enc_states.detach())
+            # (cr_feature_loss / len(wavs)).backward(retain_graph=True)
+
+            wav = wav.unsqueeze(0)
+            aug_latent_list = []
+            for i in range(args.num_augs):
+                aug_wav = apply_augmentation(args, strong_augmentation_list, wav).to(args.device)
+
+                print(f"7-2")
+                print(f"{time.time() - current}")
+                current = time.time()
+
+                aug_latent = model.encode_batch(wav, wav_lens=torch.ones(1))
+
+                print(f"7-3")
+                print(f"{time.time() - current}")
+                current = time.time()
+
+                aug_latent_list.append(aug_latent.squeeze(0))
+
+
+            aug_latent_tensor = torch.stack(aug_latent_list, dim=0)
+            mean_aug_latent_tensor = torch.mean(aug_latent_tensor, dim=0, keepdim=True)
+            loss = l1_loss(aug_latent_tensor, mean_aug_latent_tensor.detach())
+            # for aug_latent in aug_latent_list:
+            #     loss = l1_loss(aug_latent.unsqueeze(0), mean_aug_latent_tensor.detach())
+            #     (loss / (len(wavs) * len(aug_latent_list))).backward()
+
+            print(f"7-4")
+            print(f"{time.time() - current}")
+            current = time.time()
+
     if "da" in args.method:
         with open("subspace_full.pkl", "rb") as f:
             source_subspace = pickle.load(f).float().to(args.device).transpose(0, 1) # D x d
@@ -648,13 +714,13 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
             log_prob_tensor = torch.stack(log_probs_lst, dim=1)
             max_log_probs, _ = torch.max(log_prob_tensor, dim=-1, keepdim=False)
 
-            if "certain_only" in args.method:
+            if args.certain_only:
                 probs = torch.softmax(log_prob_tensor, dim=-1)
                 confidence, _ = torch.max(probs, dim=-1, keepdim=True)
                 selected_tokens = torch.where(confidence > args.prob_threshold, 1, 0).bool()
                 max_log_probs = selected_tokens * max_log_probs
 
-            if "not_blank" in args.method:
+            if args.not_blank:
                 predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
                 non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
                 max_log_probs = non_blank * max_log_probs
@@ -707,6 +773,7 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
  
         for wav in wavs:
             wav = wav.unsqueeze(0)
+            aug_log_prob_lst = []
             for i in range(num_augs):
                 if i > 0:
                     aug_wav = apply_augmentation(args, strong_augmentation_list, wav).to(args.device)
@@ -715,20 +782,84 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
 
                 log_probs_lst = forward_attn(args, model, greedy_searcher, aug_wav)
                 log_prob_tensor = torch.stack(log_probs_lst, dim=1)
-                predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
 
-                mean_prob = torch.mean(torch.softmax(log_prob_tensor, dim=-1), dim=0, keepdim=True)
-                mean_log_prob = torch.mean(torch.log_softmax(log_prob_tensor, dim=-1), dim=0, keepdim=True)
+                aug_log_prob_lst.append(log_prob_tensor.squeeze(0))
+            aug_log_prob_tensor = torch.stack(aug_log_prob_lst, dim=0)
 
-                e_loss = - torch.sum(mean_prob * mean_log_prob, dim=-1).mean()
-                (e_loss / (len(wavs) * num_augs)).backward()
+            print(f"aug_log_prob_tensor.shape : {aug_log_prob_tensor.shape}")
+            # predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
+
+            mean_prob = torch.mean(torch.softmax(aug_log_prob_tensor, dim=-1), dim=0, keepdim=True)
+            mean_log_prob = torch.mean(torch.log_softmax(aug_log_prob_tensor, dim=-1), dim=0, keepdim=True)
+            # print(f"mean_prob.shape : {mean_prob.shape}")
+
+            e_loss = - torch.sum(mean_prob * mean_log_prob, dim=-1).mean()
+            (e_loss / (len(wavs) * num_augs)).backward()
 
     print(f"7-3 : {time.time() - current}")
     current = time.time()
 
+    # print(f"hash(wavs) : {hash(wavs)}")
+    # print(f"wavs.squeeze(0).shape : {wavs.squeeze(0).shape}")
+    # print(f"str(hash(wavs.squeeze(0))) : {str(hash(wavs.squeeze(0)))}")
+
+    if args.use_memory_queue:
+        global memory_queue, HASH_COUNTER
+
+        # get current gradient
+        current_grad_dict = dict()
+        for np, p in model.named_parameters():
+            current_grad_dict[np] = p.grad if p.grad == None else p.grad.cpu().clone()
+
+        # search wavs to adapt
+        probs = torch.softmax(log_prob_tensor, dim=-1)
+        wavs_to_adapt, hash_values_to_adapt = get_instance_from_queue(args, args.queue_method, wavs, probs)
+
+        # # for debugging
+        # for wav_to_adapt, hash_value_to_adapt in zip(wavs_to_adapt, hash_values_to_adapt):
+        #     print(f"wav_to_adapt.shape, hash_value_to_adapt : {wav_to_adapt.shape}, {hash_value_to_adapt}")
+
+        # # for debugging
+        # for wav_in_queue, _, hash_value_in_queue in list(memory_queue):
+        #     print(f"wav_in_queue.shape, hash_value_in_queue : {wav_in_queue.shape}, {hash_value_in_queue}")
+
+        print(f"7-5 : {time.time() - current}")
+        current = time.time()
+
+        if len(hash_values_to_adapt) > 0:
+            grad_dict_list = [db[hash_value_to_adapt] for hash_value_to_adapt in hash_values_to_adapt]
+            cumulated_grad = dict()
+            for np, _ in model.named_parameters():
+                grads_np = [grad_dict[np] for grad_dict in grad_dict_list]
+                cumulated_grad[np] = sum(grads_np) if not None in grads_np else None
+
+            denominator = len(wavs) + len(hash_values_to_adapt)
+            for np, p in model.named_parameters():  
+                if p.grad == None:
+                    continue
+                p.grad = p.grad * len(wavs) / denominator + cumulated_grad[np].to(args.device) / denominator
+
+        print(f"7-6 : {time.time() - current}")
+        current = time.time()
+
+        for wav, prob in zip(wavs, probs):
+            # dequeue
+            while len(memory_queue) >= args.queue_size:
+                wav_to_remove, _, hash_value_to_remove = memory_queue.popleft()
+                del db[hash_value_to_remove]
+
+            # enqueue
+            hash_value = str(HASH_COUNTER)
+            memory_queue.append((wav.cpu().detach(), prob.cpu().detach(), hash_value))
+            db[hash_value] = current_grad_dict
+            HASH_COUNTER += 1
+
+        print(f"7-7 : {time.time() - current}")
+        current = time.time()
+
     optimizer.step()
 
-    print(f"7-4 : {time.time() - current}")
+    print(f"7-8 : {time.time() - current}")
     current = time.time()
 
     if scheduler is not None: 
@@ -751,11 +882,11 @@ def forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, sc
                 elif "em_sparse" in args.method:
                     selected_frame = torch.where(softmax_entropy(log_prob_tensor, dim=-1) < args.entropy_threshold, 1, 0).bool()
                     e_loss = softmax_entropy(log_prob_tensor / args.temp)[selected_frame].mean(0).mean()
-                ((args.em_coef / len(wavs)) * e_loss).backward()
+                ((args.em_coef / len(wavs)) * e_loss).backward(retain_graph=True)
 
             if 1 - args.em_coef > 0:
                 c_loss = mcc_loss(log_prob_tensor / args.temp, reweight=args.reweight, class_num=1000)
-                (((1 - args.em_coef) / len(wavs)) * c_loss).backward()
+                (((1 - args.em_coef) / len(wavs)) * c_loss).backward(retain_graph=True)
     if "cr" in args.method:
         weak_augmentation_list, strong_augmentation_list = get_augmentation(args)
         ctc_loss = CTCLoss(num_classes=1000)
@@ -795,6 +926,84 @@ def forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, sc
             target_lengths=torch.ones(len(strong_outputs)).to(args.device)
         )
         del strong_wavs, strong_outputs
+    if "cr_feature" in args.method:
+        weak_augmentation_list, strong_augmentation_list = get_augmentation(args)
+        l1_loss = nn.L1Loss()
+
+        print(type(model))
+
+        for wav_idx, wav in enumerate(wavs):
+            wav = wav.unsqueeze(0)
+            aug_latent_list = []
+            for i in range(args.num_augs):
+                aug_latent, _ = model(input_signal=wav, input_signal_length=torch.tensor([lens[wav_idx]]).to(wav.device))
+                aug_latent_list.append(aug_latent.squeeze(0))
+            aug_latent_tensor = torch.stack(aug_latent_list, dim=0)
+            mean_aug_latent_tensor = torch.mean(aug_latent_tensor, dim=0, keepdim=True)
+            print(f"mean_aug_latent_tensor.shape : {mean_aug_latent_tensor.shape}")
+            for aug_latent in aug_latent_list:
+                loss = l1_loss(aug_latent.unsqueeze(0), mean_aug_latent_tensor.detach())
+                (loss / (len(wavs) * len(aug_latent_list))).backward()
+    if "em_joint" in args.method:
+        for i, wav in enumerate(wavs):
+            wav = wav.unsqueeze(0)
+            log_probs_lst = forward_trans(args, model, wav, torch.tensor([lens[i]]).to(wav.device), gt_wavs=None)
+            log_prob_tensor = torch.stack(log_probs_lst, dim=1)
+            max_log_probs, _ = torch.max(log_prob_tensor, dim=-1, keepdim=False)
+
+            if args.certain_only:
+                probs = torch.softmax(log_prob_tensor, dim=-1)
+                confidence, _ = torch.max(probs, dim=-1, keepdim=True)
+                selected_tokens = torch.where(confidence > args.prob_threshold, 1, 0).bool().detach()
+                max_log_probs = selected_tokens * max_log_probs
+
+            if args.not_blank:
+                predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
+                non_blank = torch.where(predicted_ids != model.decoding.decoding._blank_index, 1, 0).bool().detach()
+                max_log_probs = non_blank * max_log_probs
+
+            sum_log_probs = torch.sum(max_log_probs, dim=-1)
+
+            nll_loss = - sum_log_probs.mean()
+            (nll_loss / len(wavs)).backward()
+
+    if args.use_memory_queue:
+        print(f"args.use_memory_queue : {args.use_memory_queue}")
+        global memory_queue, HASH_COUNTER
+
+        # get current gradient
+        current_grad_dict = dict()
+        for np, p in model.named_parameters():
+            current_grad_dict[np] = p.grad if p.grad == None else p.grad.cpu().clone()
+
+        # search wavs to adapt
+        probs = torch.softmax(log_prob_tensor, dim=-1)
+        wavs_to_adapt, hash_values_to_adapt = get_instance_from_queue(args, args.queue_method, wavs, probs)
+
+        if len(hash_values_to_adapt) > 0:
+            grad_dict_list = [db[hash_value_to_adapt] for hash_value_to_adapt in hash_values_to_adapt]
+            cumulated_grad = dict()
+            for np, _ in model.named_parameters():
+                grads_np = [grad_dict[np] for grad_dict in grad_dict_list]
+                cumulated_grad[np] = sum(grads_np) if not None in grads_np else None
+
+            denominator = len(wavs) + len(hash_values_to_adapt)
+            for np, p in model.named_parameters():  
+                if p.grad == None:
+                    continue
+                p.grad = p.grad * len(wavs) / denominator + cumulated_grad[np].to(args.device) / denominator
+
+        for wav, prob in zip(wavs, probs):
+            # dequeue
+            while len(memory_queue) >= args.queue_size:
+                wav_to_remove, _, hash_value_to_remove = memory_queue.popleft()
+                del db[hash_value_to_remove]
+
+            # enqueue
+            hash_value = str(HASH_COUNTER)
+            memory_queue.append((wav.cpu().detach(), prob.cpu().detach(), hash_value))
+            db[hash_value] = current_grad_dict
+            HASH_COUNTER += 1
 
     optimizer.step()
     if scheduler is not None:
@@ -808,6 +1017,7 @@ def main(args):
     split = args.split
     batch_size = args.batch_size
     extra_noise = args.extra_noise
+    noise_type = args.noise_type
     sample_rate = args.sample_rate
 
     optimizer = args.optimizer
@@ -824,15 +1034,6 @@ def main(args):
     stochastic_restoration = args.stochastic_restoration
     restore_prob = args.restore_prob
 
-<<<<<<< HEAD
-    use_memory_queue = args.use_memory_queue
-    queue_size = args.queue_size
-    n_neighbors = args.n_neighbors
-    if use_memory_queue:
-        memory_queue = Queue(maxsize=queue_size)
-
-=======
->>>>>>> 7e6662726d826fce28b0f9f6a8323983a60e3227
     if not os.path.exists(args.log_dir):
         os.makedirs(args.log_dir)
     logger = get_logger(args)
@@ -842,10 +1043,17 @@ def main(args):
     queue_size = args.queue_size
     n_neighbors = args.n_neighbors
     if use_memory_queue:
-        global memory_queue
-        memory_queue = deque([], maxlen=queue_size)
+        assert steps == 1 and batch_size == 1
 
-    dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise)
+        global memory_queue, db, HASH_COUNTER
+        memory_queue = deque([], maxlen=queue_size)
+        time_string = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+        if not os.path.exists("grad_dict"):
+            os.makedirs("grad_dict")
+        db = shelve.open(f"grad_dict/grads_{time_string}.pkl", writeback=True)
+        HASH_COUNTER = 0
+
+    dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise, noise_type=noise_type)
     gt_texts, ori_transcriptions, transcriptions_1, transcriptions_3, transcriptions_5, transcriptions_10, transcriptions_20, transcriptions_40 = [], [], [], [], [], [], [], []
 
     original_model = get_model(args, original=True)
@@ -873,9 +1081,6 @@ def main(args):
     print(f"2 : {time.time() - current}")
     current = time.time()
 
-    # TODO: casuality
-    ori_wer_list, ada_wer_list, diff_wer_list, max_ent_list, avg_ent_list, max_ood_list, avg_ood_list = [], [], [], [], [], [], []
-
     for batch_idx, batch in enumerate(dataset):
         lens, wavs, texts, _ = batch
 
@@ -891,28 +1096,76 @@ def main(args):
         print(f"4 : {time.time() - current}")
         current = time.time()
 
-        if args.use_memory_queue:
-            probs = []
-            for i, wav in enumerate(wavs):
-                wav = wav.unsqueeze(0)
-                if isinstance(model, Wav2Vec2ForCTC):
-                    logit = model(wav).logits
-                elif isinstance(model, EncoderDecoderASR):
-                    greedy_searcher = S2SRNNGreedySearcher(model.mods.decoder.emb, model.mods.decoder.dec, model.mods.decoder.fc, **{"bos_index": model.mods.decoder.bos_index, "eos_index": model.mods.decoder.eos_index, "min_decode_ratio": model.mods.decoder.min_decode_ratio, "max_decode_ratio": model.mods.decoder.max_decode_ratio,},).to(args.device)
-                    logit = forward_attn(args, model, greedy_searcher, wav, gt_wavs=None)
-                    logit = torch.stack(logit, dim=1)
-                elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
-                    logit = forward_trans(args, model, wav, torch.tensor([lens[i]]).to(wav.device), gt_wavs=None)
-                    logit = torch.stack(logit, dim=1)
-            probs.append(torch.softmax(logit.squeeze(0), dim=-1))
-            probs = pad_sequence(probs, batch_first=True).to(args.device)
-            print(f"probs.shape in main : {probs.shape}")
-            
-            wavs_to_adapt = get_instance_from_queue(args, args.queue_method, wavs, probs)
-            lens_to_adapt = torch.tensor([len(wav) for wav in wavs_to_adapt]).to(args.device)
-        else:
-            wavs_to_adapt = wavs
-            lens_to_adapt = lens
+        adapt_or_not = True
+        if args.selective_adaptation:
+            with torch.no_grad():
+                probs = []
+                for i, wav in enumerate(wavs):
+                    wav = wav.unsqueeze(0)
+                    if isinstance(model, Wav2Vec2ForCTC):
+                        logit = model(wav).logits
+                    elif isinstance(model, EncoderDecoderASR):
+                        greedy_searcher = S2SRNNGreedySearcher(model.mods.decoder.emb, model.mods.decoder.dec, model.mods.decoder.fc, **{"bos_index": model.mods.decoder.bos_index, "eos_index": model.mods.decoder.eos_index, "min_decode_ratio": model.mods.decoder.min_decode_ratio, "max_decode_ratio": model.mods.decoder.max_decode_ratio,},).to(args.device)
+                        logit = forward_attn(args, model, greedy_searcher, wav, gt_wavs=None)
+                        logit = torch.stack(logit, dim=1)
+                    elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
+                        logit = forward_trans(args, model, wav, torch.tensor([lens[i]]).to(wav.device), gt_wavs=None)
+                        logit = torch.stack(logit, dim=1)
+
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
+                probs.append(torch.softmax(logit.squeeze(0), dim=-1))
+                probs = pad_sequence(probs, batch_first=True).to(args.device)
+                per_token_ood, _ = torch.max(probs, dim=-1)
+                per_token_odd = - per_token_ood
+                max_ood, _ = torch.max(per_token_odd, dim=-1) # max_ood per each instance
+                avg_max_ood = torch.mean(max_ood, dim=-1) # average max_ood per batch
+            if avg_max_ood < args.ood_threshold:
+                adapt_or_not = False
+
+            gc.collect()
+            torch.cuda.empty_cache()
+            del probs, per_token_ood, max_ood, avg_max_ood
+
+        # if args.use_memory_queue or args.selective_adaptation:
+        #     probs = []
+        #     for i, wav in enumerate(wavs):
+        #         wav = wav.unsqueeze(0)
+        #         if isinstance(model, Wav2Vec2ForCTC):
+        #             logit = model(wav).logits
+        #         elif isinstance(model, EncoderDecoderASR):
+        #             greedy_searcher = S2SRNNGreedySearcher(model.mods.decoder.emb, model.mods.decoder.dec, model.mods.decoder.fc, **{"bos_index": model.mods.decoder.bos_index, "eos_index": model.mods.decoder.eos_index, "min_decode_ratio": model.mods.decoder.min_decode_ratio, "max_decode_ratio": model.mods.decoder.max_decode_ratio,},).to(args.device)
+        #             logit = forward_attn(args, model, greedy_searcher, wav, gt_wavs=None)
+        #             logit = torch.stack(logit, dim=1)
+        #         elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
+        #             logit = forward_trans(args, model, wav, torch.tensor([lens[i]]).to(wav.device), gt_wavs=None)
+        #             logit = torch.stack(logit, dim=1)
+        #     probs.append(torch.softmax(logit.squeeze(0), dim=-1))
+        #     probs = pad_sequence(probs, batch_first=True).to(args.device)
+
+        #     if args.selective_adaptation:
+        #         per_token_ood, _ = torch.max(probs, dim=-1)
+        #         per_token_odd = - per_token_ood
+        #         max_ood, _ = torch.max(per_token_odd, dim=-1) # max_ood per each instance
+        #         avg_max_ood = torch.mean(max_ood, dim=-1) # average max_ood per batch
+        #         if avg_max_ood < args.ood_threshold:
+        #             adapt_or_not = False
+
+        #     if args.use_memory_queue:
+        #         wavs_to_adapt = get_instance_from_queue(args, args.queue_method, wavs, probs)
+        #         lens_to_adapt = torch.tensor([len(wav) for wav in wavs_to_adapt]).to(args.device)
+        #     else:
+        #         wavs_to_adapt = wavs
+        #         lens_to_adapt = lens
+        #     wavs_to_adapt = wavs
+        #     lens_to_adapt = lens
+        # else:
+        #     wavs_to_adapt = wavs
+        #     lens_to_adapt = lens
+
+        wavs_to_adapt = wavs
+        lens_to_adapt = lens
 
         print(f"5 : {time.time() - current}")
         current = time.time()
@@ -947,16 +1200,17 @@ def main(args):
             adapter = None
 
         for step_idx in range(1, steps + 1):
-
             print(f"6 : {time.time() - current}")
             current = time.time()
 
-            if isinstance(model, Wav2Vec2ForCTC): # ctc
-                forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt)
-            elif isinstance(model, EncoderDecoderASR): # attention-based encoder-decoder
-                forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt, adapter=adapter, step_idx=step_idx)
-            elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel): # transducer
-                forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt)
+            print(f"adapt_or_not : {adapt_or_not}")
+            if adapt_or_not:
+                if isinstance(model, Wav2Vec2ForCTC): # ctc
+                    forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt)
+                elif isinstance(model, EncoderDecoderASR): # attention-based encoder-decoder
+                    forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt, adapter=adapter, step_idx=step_idx)
+                elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel): # transducer
+                    forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt)
 
             print(f"6-1 : {time.time() - current}")
             current = time.time()
@@ -977,44 +1231,45 @@ def main(args):
             torch.cuda.empty_cache()
 
         # TODO: casuality
-        if args.use_memory_queue:
-            probs_for_new = probs.clone().view(-1, probs.shape[-1])
+        # if args.use_memory_queue:
+        #     probs_for_new = probs.clone().view(-1, probs.shape[-1])
 
-            per_token_entropy = - torch.sum(probs_for_new * torch.log(probs_for_new), dim=-1)
-            max_entropy, _ = torch.max(per_token_entropy, dim=0)
-            avg_entropy = torch.mean(per_token_entropy, dim=0)
+        #     per_token_entropy = - torch.sum(probs_for_new * torch.log(probs_for_new), dim=-1)
+        #     max_entropy, _ = torch.max(per_token_entropy, dim=-1)
+        #     avg_entropy = torch.mean(per_token_entropy, dim=-1)
 
-            per_token_ood, _ = torch.max(probs_for_new, dim=-1)
-            per_token_odd = - per_token_ood
-            max_ood, _ = torch.max(per_token_odd, dim=0)
-            avg_ood = torch.mean(per_token_odd, dim=0)
+        #     per_token_ood, _ = torch.max(probs_for_new, dim=-1)
+        #     per_token_odd = - per_token_ood
+        #     max_ood, _ = torch.max(per_token_odd, dim=-1)
+        #     avg_ood = torch.mean(per_token_odd, dim=-1)
 
-            ori_wer_list.append(ori_wer)
-            ada_wer_list.append(ada_wer)
-            diff_wer_list.append(ada_wer - ori_wer)
-            max_ent_list.append(max_entropy.item())
-            avg_ent_list.append(avg_entropy.item())
-            max_ood_list.append(max_ood.item())
-            avg_ood_list.append(avg_ood.item())
+        #     ori_wer_list.append(ori_wer)
+        #     ada_wer_list.append(ada_wer)
+        #     diff_wer_list.append(ada_wer - ori_wer)
+        #     max_ent_list.append(max_entropy.item())
+        #     avg_ent_list.append(avg_entropy.item())
+        #     max_ood_list.append(max_ood.item())
+        #     avg_ood_list.append(avg_ood.item())
 
-            import pandas as pd
-            write_dict = {
-                'ori_wer': ori_wer_list,
-                'ada_wer': ada_wer_list,
-                'diff_wer': diff_wer_list,
-                'max_ent': max_ent_list,
-                'avg_ent': avg_ent_list,
-                'max_ood': max_ood_list,
-                'avg_ood': avg_ood_list
-            }
-            df = pd.DataFrame(write_dict)
-            df.to_csv(f"casuality_{args.dataset_name}_{list(args.method)}.csv", index=False)
+        #     import pandas as pd
+        #     write_dict = {
+        #         'ori_wer': ori_wer_list,
+        #         'ada_wer': ada_wer_list,
+        #         'diff_wer': diff_wer_list,
+        #         'max_ent': max_ent_list,
+        #         'avg_ent': avg_ent_list,
+        #         'max_ood': max_ood_list,
+        #         'avg_ood': avg_ood_list
+        #     }
+        #     df = pd.DataFrame(write_dict)
+        #     df.to_csv(f"casuality_{args.dataset_name}_{list(args.method)}.csv", index=False)
 
-        if args.use_memory_queue:
-            for wav, prob in zip(wavs, probs):
-                while len(memory_queue) >= args.queue_size:
-                    memory_queue.popleft()
-                memory_queue.append((wav.cpu().detach(), prob.cpu().detach()))
+        # if args.use_memory_queue and adapt_or_not:
+        #     for wav, prob in zip(wavs, probs):
+        #         while len(memory_queue) >= args.queue_size:
+        #             wav_to_remove = memory_queue.popleft()[0]
+        #             db.pop(str(hash(wav_to_remove.detach().cpu())))
+        #         memory_queue.append((wav.cpu().detach(), prob.cpu().detach(), str(hash(wav.cpu().detach()))))
 
         if stochastic_restoration:
             for model_param, original_param in zip(model.parameters(), original_model.parameters()):
