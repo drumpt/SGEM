@@ -281,6 +281,7 @@ def transcribe_batch(args, model, processor, wavs, lens):
             outputs = model(wavs).logits
             predicted_ids = torch.argmax(outputs, dim=-1)
             transcription = processor.batch_decode(predicted_ids)
+
         elif isinstance(model, EncoderDecoderASR):
             transcription = []
             for wav in wavs:
@@ -898,7 +899,7 @@ def main(args):
 
     use_memory_queue = args.use_memory_queue
     queue_size = args.queue_size
-    n_neighbors = args.n_neighbors
+    # n_neighbors = args.n_neighbors
     if use_memory_queue:
         if isinstance(model, EncoderDecoderASR):
             assert steps == 1 and batch_size == 1
@@ -934,6 +935,9 @@ def main(args):
     current = time.time()
 
     for batch_idx, batch in enumerate(dataset):
+        if batch_idx >= 5:
+            break
+
         lens, wavs, texts, _ = batch
 
         print(f"3 : {time.time() - current}")
@@ -1019,9 +1023,11 @@ def main(args):
         print(f"5 : {time.time() - current}")
         current = time.time()
 
-        gt_texts += texts
+        gt_texts.extend(texts)
+        print(f"gt_texts : {gt_texts}")
         ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
-        ori_transcriptions += ori_transcription
+        print(f"ori_transcription : {ori_transcription}")
+        ori_transcriptions.extend(ori_transcription)
         ori_wer = wer(list(texts), list(ori_transcription))
 
         logger.info(f"{batch_idx}/{len(dataset)}")
@@ -1067,7 +1073,7 @@ def main(args):
             if step_idx in [1, 3, 5, 10, 20, 40]:
                 transcription = transcribe_batch(args, model, processor, wavs, lens)
                 transcription_list = eval(f"transcriptions_{step_idx}")
-                transcription_list += transcription
+                transcription_list.extend(transcription)
 
                 ada_wer = wer(list(texts), list(transcription))
                 logger.info(f"adapt-{step_idx} WER: {ada_wer}")
