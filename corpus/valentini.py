@@ -1,12 +1,12 @@
 import re
-from builtins import str as unicode
-import pandas as pd 
-import os 
-from unicodedata import name
 from tqdm import tqdm
 from pathlib import Path
+import os
 from joblib import Parallel, delayed
 from torch.utils.data import Dataset
+from builtins import str as unicode
+from unicodedata import name
+
 
 def preprocess_text(text):
     text = unicode(text)
@@ -22,24 +22,33 @@ def preprocess_text(text):
     
     return text
 
-class CVDataset(Dataset):
-    def __init__(self, split, bucket_size, path="/home/daniel094144/data/cv-corpus-5.1-2020-06-22/en", enhance=False, ascending=False):
+
+class ValDataset(Dataset):
+    def __init__(self, split, bucket_size, path, enhance=False, ascending=False):
         # Setup
         self.path = path
         self.bucket_size = bucket_size
         
-        split = ['']
-        apath = path + "/clips"
-        tpath = path + "/test.tsv"
+        apath = os.path.join(path, "noisy_testset_wav")
+        tpath = os.path.join(path, "testset_txt")
 
-        df = pd.read_csv(tpath, sep='\t')
-        text = df['sentence'].apply(preprocess_text).values
-        file_list = df['path'].values
-        file_list = [os.path.join(apath, f) for f in file_list]
+        file_list, text_list = [], []
+        for wav in sorted(os.listdir(apath)):
+            if not wav.endswith(".wav"):
+                continue
+            file_list.append(os.path.join(apath, wav))
+        for txt_file in sorted(os.listdir(tpath)):
+            if not txt_file.endswith(".txt"):
+                continue
+            with open(os.path.join(tpath, txt_file), "r") as f:
+                txt = f.read()
+                txt = preprocess_text(txt)
+            text_list.append(txt)
 
-        print(len(file_list), len(text))
+        assert len(file_list) == len(text_list)
+
         self.file_list, self.text = zip(*[(f_name, txt)
-                                          for f_name, txt in sorted(zip(file_list, text), reverse=not ascending, key=lambda x:len(x[1]))])
+                                          for f_name, txt in sorted(zip(file_list, text_list), reverse=not ascending, key=lambda x:len(x[1]))])
 
     def __getitem__(self, index):
         if self.bucket_size > 1:

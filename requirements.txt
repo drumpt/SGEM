@@ -15,6 +15,7 @@ soundfile
 
 hydra-core==1.2.0
 hydra-colorlog==1.2.0
+tshelve
 
 numpy
 pandas
