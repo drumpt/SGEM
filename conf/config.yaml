@@ -1,6 +1,6 @@
 # model
-# asr: facebook/wav2vec2-base-960h
-asr: speechbrain/asr-crdnn-rnnlm-librispeech
+asr: facebook/wav2vec2-base-960h
+# asr: speechbrain/asr-crdnn-rnnlm-librispeech
 # asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 
 # dataset
@@ -20,9 +20,9 @@ batch_size: 1
 # optimizer & train hyparameters
 optimizer: AdamW
 scheduler: null
-lr: 5e-6
-steps: 3
-train_params: [all] # currently supported: all, feature, LN, linear(linear probing), da
+lr: 2e-5
+steps: 1
+train_params: [feature] # currently supported: all, feature, LN, linear(linear probing), da
 bias_only: false
 episodic: true # load pretrained model for every batch
 
@@ -37,13 +37,13 @@ not_blank: true
 reweight: true
 
 # memory queue
-use_memory_queue: false
+use_memory_queue: true
 queue_method: similar # currently supported: random, latest, informative, similar
 queue_size: 16
 n_neighbors: 3
 
 # selective adaptation
-selective_adaptation: true
+selective_adaptation: false
 ood_threshold: -0.45
 
 # uncertainty aware entropy minimization
