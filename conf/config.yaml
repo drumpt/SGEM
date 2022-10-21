@@ -1,5 +1,5 @@
 # model
-# asr: facebook/wav2vec2-base-960h
+asr: facebook/wav2vec2-base-960h
 # asr: speechbrain/asr-crdnn-rnnlm-librispeech
 # asr: speechbrain/asr-crdnn-transformerlm-librispeech
 asr: pretrained_models/stt_en_conformer_transducer_small.nemo
@@ -32,9 +32,9 @@ bias_only: false
 episodic: true # load pretrained model for every batch
 
 # methods & other hyperparameters
-method: [original] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, p_logp, cr, cr_feature, da, contrastive_temporal
+method: [em_joint] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, p_logp, cr, cr_feature, da, contrastive_temporal
 temp: 2.5 # temperature smoothing
-em_coef: 0
+em_coef: 0.3
 div_coef: 0
 num_augs: 2
 aug_method: augmix # augmix, standard
@@ -43,7 +43,7 @@ not_blank: true
 certain_only: true
 
 # memory queue
-use_memory_queue: false
+use_memory_queue: true
 queue_method: informative # currently supported: random, latest, informative, similar
 queue_size: 16
 n_neighbors: 3
