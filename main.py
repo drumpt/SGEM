@@ -282,8 +282,8 @@ def softmax_entropy(x, dim=-1):
 
 def non_saturating_loss(x, dim=-1):
     max_idx = torch.argmax(x, dim=dim, keepdim=True)
-    one_hots = torch.zeros_like(x).scatter(-1, max_idx, 1).to(x.device)
-    return torch.mean(one_hots * x) + torch.log(((1 - one_hots) * torch.exp(x)).sum(dim=dim)).mean()
+    one_hots = torch.zeros_like(x).scatter(dim, max_idx, 1).to(x.device)
+    return - torch.mean(one_hots * x) + torch.log(((1 - one_hots) * torch.exp(x)).sum(dim=dim)).mean()
 
 
 def mcc_loss(x, reweight=False, dim=-1, class_num=32):
@@ -480,11 +480,11 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
                 elif "em_sparse" in args.method:
                     selected_frame = torch.where(softmax_entropy(log_prob_tensor, dim=-1) < args.entropy_threshold, 1, 0).bool()
                     e_loss = softmax_entropy(log_prob_tensor / args.temp)[selected_frame].mean(0).mean()
-                (args.em_coef / len(wavs) * e_loss).backward()
+                (args.em_coef / len(wavs) * e_loss).backward(retain_graph=True)
 
             if 1 - args.em_coef > 0:
                 c_loss = mcc_loss(log_prob_tensor / args.temp, reweight=args.reweight, class_num=1000)
-                ((1 - args.em_coef) / len(wavs) * c_loss).backward()
+                ((1 - args.em_coef) / len(wavs) * c_loss).backward(retain_graph=True)
     if "cr" in args.method:
         weak_augmentation_list, strong_augmentation_list = get_augmentation(args)
         seq_loss = lambda x, y, z: speechbrain.nnet.losses.nll_loss(x, y, z, label_smoothing=0.1)
@@ -653,7 +653,14 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
 
                 e_loss = - torch.sum(mean_prob * mean_log_prob, dim=-1).mean()
                 (e_loss / (len(wavs) * num_augs)).backward()
+    if "non_saturating_loss" in args.method:
+        for wav in wavs:
+            wav = wav.unsqueeze(0)
+            log_probs_lst = forward_attn(args, model, greedy_searcher, wav)
+            log_prob_tensor = torch.stack(log_probs_lst, dim=1)
 
+            ns_loss = non_saturating_loss(log_prob_tensor)
+            (ns_loss / len(wavs)).backward()
     optimizer.step()
     if scheduler is not None: 
         scheduler.step()
@@ -1093,9 +1100,13 @@ def main(args):
             if isinstance(model, Wav2Vec2ForCTC): # ctc
                 forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens)
             elif isinstance(model, EncoderDecoderASR): # attention-based encoder-decoder
+                model.train()
                 forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens, adapter=adapter, step_idx=step_idx)
+                model.eval()
             elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel): # transducer
+                model.train()
                 forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens)
+                model.eval()
 
             if step_idx in [1, 3, 5, 10, 20, 40]:
                 transcription = transcribe_batch(args, model, processor, wavs, lens)
