@@ -281,6 +281,7 @@ def transcribe_batch(args, model, processor, wavs, lens):
             outputs = model(wavs).logits
             predicted_ids = torch.argmax(outputs, dim=-1)
             transcription = processor.batch_decode(predicted_ids)
+
         elif isinstance(model, EncoderDecoderASR):
             transcription = []
             for wav in wavs:
@@ -366,6 +367,7 @@ def generate_adversarial_example(wavs, model, target_snr=15, lr=1e-4, n_steps=5)
 
 def get_instance_from_queue(args, method, wavs, probs):
     out_wavs, out_hash_values = [], []
+
     if args.n_neighbors <= 0:
         selected_instances = []
     elif len(memory_queue) <= args.n_neighbors:
@@ -491,43 +493,6 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
 
             nll_loss = - sum_log_probs.mean()
             (nll_loss / len(wavs)).backward()
-
-    if args.use_memory_queue:
-        global memory_queue, HASH_COUNTER
-
-        # get current gradient
-        current_grad_dict = dict()
-        for np, p in model.named_parameters():
-            current_grad_dict[np] = p.grad if p.grad == None else p.grad.cpu().clone()
-
-        # search wavs to adapt
-        probs = torch.softmax(log_prob_tensor, dim=-1)
-        wavs_to_adapt, hash_values_to_adapt = get_instance_from_queue(args, args.queue_method, wavs, probs)
-
-        if len(hash_values_to_adapt) > 0:
-            grad_dict_list = [db[hash_value_to_adapt] for hash_value_to_adapt in hash_values_to_adapt]
-            cumulated_grad = dict()
-            for np, _ in model.named_parameters():
-                grads_np = [grad_dict[np] for grad_dict in grad_dict_list]
-                cumulated_grad[np] = sum(grads_np) if not None in grads_np else None
-
-            denominator = len(wavs) + len(hash_values_to_adapt)
-            for np, p in model.named_parameters():  
-                if p.grad == None:
-                    continue
-                p.grad = p.grad * len(wavs) / denominator + cumulated_grad[np].to(args.device) / denominator
-
-        for wav, prob in zip(wavs, probs):
-            # dequeue
-            while len(memory_queue) >= args.queue_size:
-                wav_to_remove, _, hash_value_to_remove = memory_queue.popleft()
-                del db[hash_value_to_remove]
-
-            # enqueue
-            hash_value = str(HASH_COUNTER)
-            memory_queue.append((wav.cpu().detach(), prob.cpu().detach(), hash_value))
-            db[hash_value] = current_grad_dict
-            HASH_COUNTER += 1
 
     optimizer.step()
     if scheduler is not None:
@@ -815,14 +780,6 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
         probs = torch.softmax(log_prob_tensor, dim=-1)
         wavs_to_adapt, hash_values_to_adapt = get_instance_from_queue(args, args.queue_method, wavs, probs)
 
-        # # for debugging
-        # for wav_to_adapt, hash_value_to_adapt in zip(wavs_to_adapt, hash_values_to_adapt):
-        #     print(f"wav_to_adapt.shape, hash_value_to_adapt : {wav_to_adapt.shape}, {hash_value_to_adapt}")
-
-        # # for debugging
-        # for wav_in_queue, _, hash_value_in_queue in list(memory_queue):
-        #     print(f"wav_in_queue.shape, hash_value_in_queue : {wav_in_queue.shape}, {hash_value_in_queue}")
-
         print(f"7-5 : {time.time() - current}")
         current = time.time()
 
@@ -967,44 +924,6 @@ def forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, sc
             nll_loss = - sum_log_probs.mean()
             (nll_loss / len(wavs)).backward()
 
-    if args.use_memory_queue:
-        print(f"args.use_memory_queue : {args.use_memory_queue}")
-        global memory_queue, HASH_COUNTER
-
-        # get current gradient
-        current_grad_dict = dict()
-        for np, p in model.named_parameters():
-            current_grad_dict[np] = p.grad if p.grad == None else p.grad.cpu().clone()
-
-        # search wavs to adapt
-        probs = torch.softmax(log_prob_tensor, dim=-1)
-        wavs_to_adapt, hash_values_to_adapt = get_instance_from_queue(args, args.queue_method, wavs, probs)
-
-        if len(hash_values_to_adapt) > 0:
-            grad_dict_list = [db[hash_value_to_adapt] for hash_value_to_adapt in hash_values_to_adapt]
-            cumulated_grad = dict()
-            for np, _ in model.named_parameters():
-                grads_np = [grad_dict[np] for grad_dict in grad_dict_list]
-                cumulated_grad[np] = sum(grads_np) if not None in grads_np else None
-
-            denominator = len(wavs) + len(hash_values_to_adapt)
-            for np, p in model.named_parameters():  
-                if p.grad == None:
-                    continue
-                p.grad = p.grad * len(wavs) / denominator + cumulated_grad[np].to(args.device) / denominator
-
-        for wav, prob in zip(wavs, probs):
-            # dequeue
-            while len(memory_queue) >= args.queue_size:
-                wav_to_remove, _, hash_value_to_remove = memory_queue.popleft()
-                del db[hash_value_to_remove]
-
-            # enqueue
-            hash_value = str(HASH_COUNTER)
-            memory_queue.append((wav.cpu().detach(), prob.cpu().detach(), hash_value))
-            db[hash_value] = current_grad_dict
-            HASH_COUNTER += 1
-
     optimizer.step()
     if scheduler is not None:
         scheduler.step()
@@ -1039,11 +958,18 @@ def main(args):
     logger = get_logger(args)
     logger.info(OmegaConf.to_yaml(args))
 
+    dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise, noise_type=noise_type)
+    gt_texts, ori_transcriptions, transcriptions_1, transcriptions_3, transcriptions_5, transcriptions_10, transcriptions_20, transcriptions_40 = [], [], [], [], [], [], [], []
+
+    original_model = get_model(args, original=True)
+    model = get_model(args, original=False)
+
     use_memory_queue = args.use_memory_queue
     queue_size = args.queue_size
-    n_neighbors = args.n_neighbors
+    # n_neighbors = args.n_neighbors
     if use_memory_queue:
-        assert steps == 1 and batch_size == 1
+        if isinstance(model, EncoderDecoderASR):
+            assert steps == 1 and batch_size == 1
 
         global memory_queue, db, HASH_COUNTER
         memory_queue = deque([], maxlen=queue_size)
@@ -1052,12 +978,6 @@ def main(args):
             os.makedirs("grad_dict")
         db = shelve.open(f"grad_dict/grads_{time_string}.pkl", writeback=True)
         HASH_COUNTER = 0
-
-    dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise, noise_type=noise_type)
-    gt_texts, ori_transcriptions, transcriptions_1, transcriptions_3, transcriptions_5, transcriptions_10, transcriptions_20, transcriptions_40 = [], [], [], [], [], [], [], []
-
-    original_model = get_model(args, original=True)
-    model = get_model(args, original=False)
 
     current = time.time()
 
@@ -1128,51 +1048,50 @@ def main(args):
             torch.cuda.empty_cache()
             del probs, per_token_ood, max_ood, avg_max_ood
 
-        # if args.use_memory_queue or args.selective_adaptation:
-        #     probs = []
-        #     for i, wav in enumerate(wavs):
-        #         wav = wav.unsqueeze(0)
-        #         if isinstance(model, Wav2Vec2ForCTC):
-        #             logit = model(wav).logits
-        #         elif isinstance(model, EncoderDecoderASR):
-        #             greedy_searcher = S2SRNNGreedySearcher(model.mods.decoder.emb, model.mods.decoder.dec, model.mods.decoder.fc, **{"bos_index": model.mods.decoder.bos_index, "eos_index": model.mods.decoder.eos_index, "min_decode_ratio": model.mods.decoder.min_decode_ratio, "max_decode_ratio": model.mods.decoder.max_decode_ratio,},).to(args.device)
-        #             logit = forward_attn(args, model, greedy_searcher, wav, gt_wavs=None)
-        #             logit = torch.stack(logit, dim=1)
-        #         elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
-        #             logit = forward_trans(args, model, wav, torch.tensor([lens[i]]).to(wav.device), gt_wavs=None)
-        #             logit = torch.stack(logit, dim=1)
-        #     probs.append(torch.softmax(logit.squeeze(0), dim=-1))
-        #     probs = pad_sequence(probs, batch_first=True).to(args.device)
+        if (args.use_memory_queue or args.selective_adaptation) and not isinstance(model, EncoderDecoderASR):
+            probs = []
+            for i, wav in enumerate(wavs):
+                wav = wav.unsqueeze(0)
+                if isinstance(model, Wav2Vec2ForCTC):
+                    logit = model(wav).logits
+                elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
+                    logit = forward_trans(args, model, wav, torch.tensor([lens[i]]).to(wav.device), gt_wavs=None)
+                    logit = torch.stack(logit, dim=1)
+            probs.append(torch.softmax(logit.squeeze(0), dim=-1))
+            probs = pad_sequence(probs, batch_first=True).to(args.device)
 
-        #     if args.selective_adaptation:
-        #         per_token_ood, _ = torch.max(probs, dim=-1)
-        #         per_token_odd = - per_token_ood
-        #         max_ood, _ = torch.max(per_token_odd, dim=-1) # max_ood per each instance
-        #         avg_max_ood = torch.mean(max_ood, dim=-1) # average max_ood per batch
-        #         if avg_max_ood < args.ood_threshold:
-        #             adapt_or_not = False
+            if args.selective_adaptation:
+                per_token_ood, _ = torch.max(probs, dim=-1)
+                per_token_odd = - per_token_ood
+                max_ood, _ = torch.max(per_token_odd, dim=-1) # max_ood per each instance
+                avg_max_ood = torch.mean(max_ood, dim=-1) # average max_ood per batch
+                if avg_max_ood < args.ood_threshold:
+                    adapt_or_not = False
 
-        #     if args.use_memory_queue:
-        #         wavs_to_adapt = get_instance_from_queue(args, args.queue_method, wavs, probs)
-        #         lens_to_adapt = torch.tensor([len(wav) for wav in wavs_to_adapt]).to(args.device)
-        #     else:
-        #         wavs_to_adapt = wavs
-        #         lens_to_adapt = lens
-        #     wavs_to_adapt = wavs
-        #     lens_to_adapt = lens
-        # else:
-        #     wavs_to_adapt = wavs
-        #     lens_to_adapt = lens
-
-        wavs_to_adapt = wavs
-        lens_to_adapt = lens
+            if args.use_memory_queue:
+                wavs_to_adapt = []
+                for wav in wavs:
+                    wavs_to_adapt.append(wav)
+                for wav in get_instance_from_queue(args, args.queue_method, wavs, probs)[0]:
+                    wavs_to_adapt.append(wav)
+                wavs_to_adapt = pad_sequence(wavs_to_adapt, batch_first=True)
+                print(f"len(wavs_to_adapt) : {len(wavs_to_adapt)}")
+                lens_to_adapt = torch.tensor([len(wav) for wav in wavs_to_adapt]).to(args.device)
+            else:
+                wavs_to_adapt = wavs
+                lens_to_adapt = lens
+        else:
+            wavs_to_adapt = wavs
+            lens_to_adapt = lens
 
         print(f"5 : {time.time() - current}")
         current = time.time()
 
-        gt_texts += texts
+        gt_texts.extend(texts)
+        print(f"gt_texts : {gt_texts}")
         ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
-        ori_transcriptions += ori_transcription
+        print(f"ori_transcription : {ori_transcription}")
+        ori_transcriptions.extend(ori_transcription)
         ori_wer = wer(list(texts), list(ori_transcription))
 
         logger.info(f"{batch_idx}/{len(dataset)}")
@@ -1218,7 +1137,7 @@ def main(args):
             if step_idx in [1, 3, 5, 10, 20, 40]:
                 transcription = transcribe_batch(args, model, processor, wavs, lens)
                 transcription_list = eval(f"transcriptions_{step_idx}")
-                transcription_list += transcription
+                transcription_list.extend(transcription)
 
                 ada_wer = wer(list(texts), list(transcription))
                 logger.info(f"adapt-{step_idx} WER: {ada_wer}")
@@ -1230,46 +1149,11 @@ def main(args):
             gc.collect()
             torch.cuda.empty_cache()
 
-        # TODO: casuality
-        # if args.use_memory_queue:
-        #     probs_for_new = probs.clone().view(-1, probs.shape[-1])
-
-        #     per_token_entropy = - torch.sum(probs_for_new * torch.log(probs_for_new), dim=-1)
-        #     max_entropy, _ = torch.max(per_token_entropy, dim=-1)
-        #     avg_entropy = torch.mean(per_token_entropy, dim=-1)
-
-        #     per_token_ood, _ = torch.max(probs_for_new, dim=-1)
-        #     per_token_odd = - per_token_ood
-        #     max_ood, _ = torch.max(per_token_odd, dim=-1)
-        #     avg_ood = torch.mean(per_token_odd, dim=-1)
-
-        #     ori_wer_list.append(ori_wer)
-        #     ada_wer_list.append(ada_wer)
-        #     diff_wer_list.append(ada_wer - ori_wer)
-        #     max_ent_list.append(max_entropy.item())
-        #     avg_ent_list.append(avg_entropy.item())
-        #     max_ood_list.append(max_ood.item())
-        #     avg_ood_list.append(avg_ood.item())
-
-        #     import pandas as pd
-        #     write_dict = {
-        #         'ori_wer': ori_wer_list,
-        #         'ada_wer': ada_wer_list,
-        #         'diff_wer': diff_wer_list,
-        #         'max_ent': max_ent_list,
-        #         'avg_ent': avg_ent_list,
-        #         'max_ood': max_ood_list,
-        #         'avg_ood': avg_ood_list
-        #     }
-        #     df = pd.DataFrame(write_dict)
-        #     df.to_csv(f"casuality_{args.dataset_name}_{list(args.method)}.csv", index=False)
-
-        # if args.use_memory_queue and adapt_or_not:
-        #     for wav, prob in zip(wavs, probs):
-        #         while len(memory_queue) >= args.queue_size:
-        #             wav_to_remove = memory_queue.popleft()[0]
-        #             db.pop(str(hash(wav_to_remove.detach().cpu())))
-        #         memory_queue.append((wav.cpu().detach(), prob.cpu().detach(), str(hash(wav.cpu().detach()))))
+        if args.use_memory_queue and adapt_or_not and not isinstance(model, EncoderDecoderASR):
+            for wav, prob in zip(wavs, probs):
+                while len(memory_queue) >= args.queue_size:
+                    wav_to_remove = memory_queue.popleft()[0]
+                memory_queue.append((wav.cpu().detach(), prob.cpu().detach(), str(hash(wav.cpu().detach()))))
 
         if stochastic_restoration:
             for model_param, original_param in zip(model.parameters(), original_model.parameters()):
