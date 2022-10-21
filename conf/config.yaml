@@ -1,56 +1,62 @@
 # model
 # asr: facebook/wav2vec2-base-960h
-asr: speechbrain/asr-crdnn-rnnlm-librispeech
-# asr: pretrained_models/stt_en_conformer_transducer_small.nemo
+# asr: speechbrain/asr-crdnn-rnnlm-librispeech
+# asr: speechbrain/asr-crdnn-transformerlm-librispeech
+asr: pretrained_models/stt_en_conformer_transducer_small.nemo
+# asr: pretrained_models/stt_en_conformer_transducer_large.nemo
 
 # dataset
 # dataset_name: librispeech
 # dataset_dir: /home/server34/hdd/changhun_workspace/nfs-client/LibriSpeech
 dataset_name: chime
 dataset_dir: /home/server34/hdd/changhun_workspace/nfs-client/CHiME3
-# dataset_name: commonvoice
-# dataset_dir: /home/server34/hdd/changhun_workspace/nfs-client/cv-corpus-5.1-2020-06-22/en
 # dataset_name: ted
 # dataset_dir: /home/server34/hdd/changhun_workspace/nfs-client/TEDLIUM_release2/test
+# dataset_name: valentini
+# dataset_dir: /home/server34/hdd/changhun_workspace/nfs-client/Valentini
+# dataset_name: commonvoice
+# dataset_dir: /home/server34/hdd/changhun_workspace/nfs-client/cv-corpus-5.1-2020-06-22/en
 split: [test-other]
-extra_noise: 0.01
+extra_noise: 0.00
+noise_type: null # currently supported: null, AirConditioner_6, AirportAnnouncements_2, Babble_4, CopyMachine_2, Munching_3, Neighbor_6, ShuttingDoor_6, Typing_2, VacuumCleaner_1
 sample_rate: 16000
-batch_size: 1
+batch_size: 4
 
 # optimizer & train hyparameters
 optimizer: AdamW
 scheduler: null
-lr: 5e-6
-steps: 3
+lr: 2e-5
+steps: 10
 train_params: [all] # currently supported: all, feature, LN, linear(linear probing), da
 bias_only: false
 episodic: true # load pretrained model for every batch
 
 # methods & other hyperparameters
-method: [em_joint] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, p_logp, cr, cr_feature, da, contrastive_temporal
+method: [original] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, p_logp, cr, cr_feature, da, contrastive_temporal
 temp: 2.5 # temperature smoothing
-em_coef: 1
+em_coef: 0
 div_coef: 0
-num_augs: 1
+num_augs: 2
 aug_method: augmix # augmix, standard
-not_blank: true
 reweight: true
+not_blank: true
+certain_only: true
 
 # memory queue
 use_memory_queue: false
-queue_method: similar # currently supported: random, latest, informative, similar
+queue_method: informative # currently supported: random, latest, informative, similar
 queue_size: 16
 n_neighbors: 3
 
 # selective adaptation
-selective_adaptation: true
+selective_adaptation: false
 ood_threshold: -0.45
 
 # uncertainty aware entropy minimization
 prob_threshold: 0.9
 entropy_threshold: 0.05
 
-# teacher student model for non episodic adaptation
+# teacher-student model for non episodic adaptation
 teacher_student: false
 momentum: 0.99
 
@@ -58,16 +64,8 @@ momentum: 0.99
 stochastic_restoration: false
 restore_prob: 0.01
 
-<<<<<<< HEAD
-# memory queue
-use_memory_queue: true
-queue_size: 32
-n_neighbors: 4
-
-=======
->>>>>>> 7e6662726d826fce28b0f9f6a8323983a60e3227
 # device
 device: cuda
 
 # logging
-log_dir: exps/test
+log_dir: exps/real_paper_test
