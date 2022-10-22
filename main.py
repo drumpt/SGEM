@@ -435,7 +435,6 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
                         selected_frame = torch.where(softmax_entropy(outputs, dim=-1) < args.entropy_threshold, 1, 0).bool()
                         e_loss = softmax_entropy(outputs / args.temp)[selected_frame].mean(0).mean() 
                 (args.em_coef * e_loss).backward(retain_graph=True)
-
             if 1 - args.em_coef > 0:
                 c_loss = mcc_loss(outputs / args.temp, args.reweight)
                 ((1 - args.em_coef) * c_loss).backward(retain_graph=True)
@@ -795,6 +794,8 @@ def forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, sc
             if 1 - args.em_coef > 0:
                 c_loss = mcc_loss(log_prob_tensor / args.temp, reweight=args.reweight, class_num=1000)
                 (((1 - args.em_coef) / len(wavs)) * c_loss).backward(retain_graph=True)
+            
+            print("Hello")
     if "cr" in args.method:
         weak_augmentation_list, strong_augmentation_list = get_augmentation(args)
         ctc_loss = CTCLoss(num_classes=1000)
@@ -853,6 +854,8 @@ def forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, sc
                 max_log_probs = non_blank * max_log_probs
 
             sum_log_probs = torch.sum(max_log_probs, dim=-1)
+
+            print(f"sum_log_probs : {sum_log_probs}")
 
             nll_loss = - sum_log_probs.mean()
             (nll_loss / len(wavs)).backward()
@@ -935,9 +938,6 @@ def main(args):
     current = time.time()
 
     for batch_idx, batch in enumerate(dataset):
-        if batch_idx >= 5:
-            break
-
         lens, wavs, texts, _ = batch
 
         print(f"3 : {time.time() - current}")
@@ -1024,9 +1024,7 @@ def main(args):
         current = time.time()
 
         gt_texts.extend(texts)
-        print(f"gt_texts : {gt_texts}")
         ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
-        print(f"ori_transcription : {ori_transcription}")
         ori_transcriptions.extend(ori_transcription)
         ori_wer = wer(list(texts), list(ori_transcription))
 
