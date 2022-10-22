@@ -1,15 +1,15 @@
 # model
-asr: facebook/wav2vec2-base-960h
-# asr: speechbrain/asr-crdnn-rnnlm-librispeech
+# asr: facebook/wav2vec2-base-960h
+asr: speechbrain/asr-crdnn-rnnlm-librispeech
 # asr: speechbrain/asr-crdnn-transformerlm-librispeech
 # asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 # asr: pretrained_models/stt_en_conformer_transducer_large.nemo
 
 # dataset
-# dataset_name: librispeech
-# dataset_dir: /home/server27/hdd/changhun_workspace/nfs-client/LibriSpeech
-dataset_name: chime
-dataset_dir: /home/server27/hdd/changhun_workspace/nfs-client/CHiME3
+dataset_name: librispeech
+dataset_dir: /home/server27/hdd/changhun_workspace/nfs-client/LibriSpeech
+# dataset_name: chime
+# dataset_dir: /home/server27/hdd/changhun_workspace/nfs-client/CHiME3
 # dataset_name: ted
 # dataset_dir: /home/server27/hdd/changhun_workspace/nfs-client/TEDLIUM_release2/test
 # dataset_name: valentini
@@ -17,24 +17,24 @@ dataset_dir: /home/server27/hdd/changhun_workspace/nfs-client/CHiME3
 # dataset_name: commonvoice
 # dataset_dir: /home/server27/hdd/changhun_workspace/nfs-client/cv-corpus-5.1-2020-06-22/en
 split: [test-other]
-extra_noise: 0.01
-noise_type: null # currently supported: null, AirConditioner_6, AirportAnnouncements_2, Babble_4, CopyMachine_2, Munching_3, Neighbor_6, ShuttingDoor_6, Typing_2, VacuumCleaner_1
+extra_noise: 0.00
+noise_type: AirConditioner_6 # currently supported: null, AirConditioner_6, AirportAnnouncements_2, Babble_4, CopyMachine_2, Munching_3, Neighbor_6, ShuttingDoor_6, Typing_2, VacuumCleaner_1
 sample_rate: 16000
 batch_size: 1
 
 # optimizer & train hyparameters
 optimizer: AdamW
 scheduler: null
-lr: 1e-6
-steps: 10
+lr: 1e-5
+steps: 1
 train_params: [all] # currently supported: all, feature, LN, linear(linear probing), da
 bias_only: false
 episodic: true # load pretrained model for every batch
 
 # methods & other hyperparameters
-method: [em_joint] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, p_logp, cr, cr_feature, da, contrastive_temporal
+method: [em_joint, original] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, p_logp, cr, cr_feature, da, contrastive_temporal
 temp: 2.5 # temperature smoothing
-em_coef: 0.3
+em_coef: 0
 div_coef: 0
 num_augs: 1
 aug_method: augmix # augmix, standard
