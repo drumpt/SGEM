@@ -38,7 +38,7 @@ class CHiMEDataset(Dataset):
             transcription = read_text(tpath, str(f))
             text.append(transcription)
 
-        if enhance: 
+        if enhance:
             file_list = []
             for s in split: 
                 split_list = list(Path(os.path.join(os.path.join(apath, s), 'se_wav')).glob("*.wav"))
