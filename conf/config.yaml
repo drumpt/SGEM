@@ -39,7 +39,7 @@ div_coef: 0
 num_augs: 1
 aug_method: augmix # augmix, standard
 reweight: true
-not_blank: false
+not_blank: true
 certain_only: true
 
 # memory queue
