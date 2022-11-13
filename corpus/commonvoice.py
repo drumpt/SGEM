@@ -5,9 +5,8 @@ import os
 from unicodedata import name
 from tqdm import tqdm
 from pathlib import Path
-import os
 from joblib import Parallel, delayed
-from torch.utils.data import Dataset            
+from torch.utils.data import Dataset
 
 def preprocess_text(text):
     text = unicode(text)
