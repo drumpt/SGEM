@@ -1,6 +1,4 @@
 numba==0.53.0
-librosa==0.9.2
-soundfile
 braceexpand
 webdataset
 youtokentome
@@ -11,20 +9,22 @@ traitlets
 ptyprocess
 pickleshare
 backcall
+ipython
+librosa==0.9.2
+soundfile
 
 hydra-core==1.2.0
 hydra-colorlog==1.2.0
+tshelve
 
 numpy
 pandas
 torch==1.11.0
 torchaudio
-
 transformers
-git+https://github.com/huggingface/transformers
 speechbrain
 nemo-toolkit
-pytorch-lightning==1.7.7
+pytorch-lightning==1.6.5
 
 audio_augmentations
 git+https://github.com/facebookresearch/WavAugment
