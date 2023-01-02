@@ -17,30 +17,32 @@ dataset_dir: /home/server17/hdd/changhun_workspace/CHiME3
 # dataset_name: commonvoice
 # dataset_dir: /home/server17/hdd/changhun_workspace/cv-corpus-5.1-2020-06-22/en
 split: [test-other]
-extra_noise: 0.01
+extra_noise: 0.00
 noise_type: null  # currently supported: null, AirConditioner_6, AirportAnnouncements_2, Babble_4, CopyMachine_2, Munching_3, Neighbor_6, ShuttingDoor_6, Typing_2, VacuumCleaner_1
 sample_rate: 16000
-batch_size: 4
+batch_size: 1
 
 # optimizer & train hyparameters
 optimizer: AdamW
 scheduler: null
 lr: 2e-5
-steps: 5
+steps: 10
 train_params: [feature] # currently supported: all, feature, LN, linear(linear probing), da
 bias_only: false
 episodic: true # load pretrained model for every batch
 
 # methods & other hyperparameters
-method: [original] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, p_logp, cr, cr_feature, da, contrastive_temporal
+method: [beam_search_negative_sampling] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, p_logp, cr, cr_feature, da, contrastive_temporal, memo_dropout, gce, ctc, mixup, beam_search_max, beam_search_all, beam_search_negative_sampling, beam_em_mix, diversity_maximization
 temp: 2.5 # temperature smoothing
 em_coef: 0.3
 div_coef: 0
+dm_coef: 0.2
 num_augs: 1
 aug_method: augmix # augmix, standard
 reweight: true
 not_blank: true
 certain_only: true
+negative_sampling_method: beam_candidate # random, beam_candidate
 
 # memory queue
 use_memory_queue: false
@@ -65,7 +67,7 @@ stochastic_restoration: false
 restore_prob: 0.01
 
 # device
-device: cuda
+device: cpu
 
 # logging
 log_dir: exps/test
