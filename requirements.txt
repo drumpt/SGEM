@@ -25,6 +25,8 @@ transformers
 speechbrain
 nemo-toolkit
 pytorch-lightning==1.6.5
+pyctcdecode
+https://github.com/kpu/kenlm/archive/master.zip
 
 audio_augmentations
 git+https://github.com/facebookresearch/WavAugment

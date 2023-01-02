@@ -1,18 +1,17 @@
 import os
-import copy
 import random
 import gc
 import logging
 import pickle
 import shelve
-from datetime import datetime
 from copy import deepcopy
 import time
+from datetime import datetime
 from collections import deque
-import collections, functools, operator
+import math
 
 import hydra
-from omegaconf import OmegaConf, open_dict
+from omegaconf import OmegaConf
 
 import numpy as np
 from sklearn.decomposition import PCA
@@ -22,26 +21,34 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 from torch import nn
 import torch.nn.functional as F
-import torchaudio
 from torch.nn.utils.rnn import pad_sequence
+from torch.distributions import Beta
+import torchaudio
 from info_nce import InfoNCE
 
-from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor, Wav2Vec2CTCTokenizer, Wav2Vec2ProcessorWithLM
 import speechbrain
 from speechbrain.pretrained import EncoderDecoderASR
 from speechbrain.lobes.augment import TimeDomainSpecAugment
 from speechbrain.decoders.seq2seq import S2SRNNGreedySearcher
 import nemo.collections.asr as nemo_asr
-from nemo.collections.asr.parts.utils import rnnt_utils
 from nemo.collections.asr.losses.ctc import CTCLoss
-from nemo.collections.common.parts.rnn import label_collate
+from nemo.collections.asr.parts.submodules import rnnt_greedy_decoding
 
 from audio_augmentations import *
-import sentencepiece
 from jiwer import wer
 
 from data import load_dataset
 from forward import *
+
+from pyctcdecode.constants import (
+    DEFAULT_BEAM_WIDTH,
+    DEFAULT_HOTWORD_WEIGHT,
+    DEFAULT_MIN_TOKEN_LOGP,
+    DEFAULT_PRUNE_LOGP,
+    DEFAULT_PRUNE_BEAMS
+)
+from nemo.collections.asr.parts.submodules.rnnt_beam_decoding import BeamRNNTInfer
 
 
 def get_logger(args):
@@ -285,18 +292,19 @@ def transcribe_batch(args, model, processor, wavs, lens):
                 predicted_ids = torch.argmax(outputs, dim=-1)
                 text = processor.batch_decode(predicted_ids)
                 transcription.append(text[0])
-
         elif isinstance(model, EncoderDecoderASR):
             transcription = []
             for wav, len in zip(wavs, lens):
                 wav = wav[:len].unsqueeze(0)
-                text = model.transcribe_batch(wav, wav_lens=len.to(args.device))[0]
+                text = model.transcribe_batch(wav, wav_lens=torch.ones(1).to(args.device))[0]
                 transcription.append(text[0])
         elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel): # conformer from nemo
             transcription = []
             for wav, len in zip(wavs, lens):
                 wav = wav[:len].unsqueeze(0)
-                encoded_feature, encoded_len = model(input_signal=wav[:len], input_signal_length=lens)
+                len = len.unsqueeze(0)
+
+                encoded_feature, encoded_len = model(input_signal=wav, input_signal_length=len)
                 best_hyp_texts, _ = model.decoding.rnnt_decoder_predictions_tensor(
                     encoder_output=encoded_feature, encoded_lengths=encoded_len, return_hypotheses=False
                 )
@@ -336,10 +344,47 @@ def mcc_loss(x, reweight=False, dim=-1, class_num=32):
     return mcc_loss
 
 
+def pseudo_labeling_loss(outputs, vocab, processor):
+    ctc_loss = nn.CTCLoss(blank=0, zero_infinity=False)
+    predicted_ids = torch.argmax(outputs, dim=-1)
+    transcription = processor.batch_decode(predicted_ids)[0]
+    target = []
+    for s in transcription:
+        if s == ' ':
+            s = '|'
+        target.append(vocab[s])
+
+    logp = outputs.log_softmax(1).transpose(1, 0) # L,N,D
+    input_len = logp.shape[0]
+    tgt_len = len(target)
+    loss = ctc_loss(logp, torch.tensor(target).int(), torch.tensor([input_len]), torch.tensor([tgt_len]))
+    return loss
+
+
 def js_divergence(p1, p2):
     total_m = 0.5 * (p1 + p2)
     loss = 0.5 * F.kl_div(torch.log(p1), total_m, reduction="batchmean") + 0.5 * F.kl_div(torch.log(p2), total_m, reduction="batchmean")
     return loss
+
+
+def _log_softmax(
+    x: np.ndarray,  # type: ignore [type-arg]
+    axis: Optional[int] = None,
+) -> np.ndarray:  # type: ignore [type-arg]
+    """Logarithm of softmax function, following implementation of scipy.special."""
+    x_max = np.amax(x, axis=axis, keepdims=True)
+    if x_max.ndim > 0:
+        x_max[~np.isfinite(x_max)] = 0
+    elif not np.isfinite(x_max):
+        x_max = 0  # pylint: disable=R0204
+    tmp = x - x_max
+    exp_tmp = np.exp(tmp)
+    # suppress warnings about log of zero
+    with np.errstate(divide="ignore"):
+        s = np.sum(exp_tmp, axis=axis, keepdims=True)  # type: ignore [arg-type]
+        out: np.ndarray = np.log(s)  # type: ignore [type-arg]
+    out = tmp - out
+    return out
 
 
 def generate_adversarial_example(wavs, model, target_snr=15, lr=1e-4, n_steps=5):
@@ -416,14 +461,14 @@ def get_instance_from_queue(args, method, wavs, probs):
 
 
 def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens):
-    # logger.info(f"in forward_and_adapt_ctc wavs: {wavs}")
-    # logger.info(f"in forward_and_adapt_ctc lens: {lens}")
-
     optimizer.zero_grad()
-    if "original" in args.method or "em_uncertainty" in args.method or "em_sparse" in args.method:
+
+    if "original" in args.method or "em_uncertainty" in args.method or "em_sparse" in args.method or "memo_dropout" in args.method:
         for i, wav in enumerate(wavs):
+
             wav = wav[:lens[i]].unsqueeze(0)
             outputs = model(wav).logits
+            
             predicted_ids = torch.argmax(outputs, dim=-1)
             non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
 
@@ -435,10 +480,12 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
                         e_loss = softmax_entropy(outputs / args.temp).mean(0).mean() 
                 elif "em_uncertainty" in args.method:
                     if args.not_blank:
-                        frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)[non_blank]), p=1, dim=-1).detach()
+                        # frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)[non_blank]), p=1, dim=-1).detach()
+                        frame_weight = F.normalize(softmax_entropy(outputs)[non_blank], p=1, dim=-1).detach()
                         e_loss = torch.sum(frame_weight * softmax_entropy(outputs / args.temp)[non_blank], dim=-1).mean()
                     else:
-                        frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)), dim=-1).detach()
+                        # frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)), dim=-1).detach()
+                        frame_weight = F.normalize(softmax_entropy(outputs), dim=-1).detach()
                         e_loss = torch.sum(frame_weight * softmax_entropy(outputs / args.temp), dim=-1).mean()
                 elif "em_sparse" in args.method:
                     if args.not_blank:
@@ -446,7 +493,21 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
                         e_loss = softmax_entropy(outputs / args.temp)[selected_frame].mean(0).mean()
                     else:
                         selected_frame = torch.where(softmax_entropy(outputs, dim=-1) < args.entropy_threshold, 1, 0).bool()
-                        e_loss = softmax_entropy(outputs / args.temp)[selected_frame].mean(0).mean() 
+                        e_loss = softmax_entropy(outputs / args.temp)[selected_frame].mean(0).mean()
+                elif "memo_dropout" in args.method:
+                    e_loss = 0
+                    model.train()
+                    # outputs = []
+                    for _ in range(5):
+                        outputs = model(wav).logits
+                        # predicted_ids = torch.argmax(output, dim=-1)
+                        # outputs.append(output.squeeze(0))
+                        e_loss += (softmax_entropy(outputs / args.temp)[non_blank].mean(0).mean()) / 5
+                    # outputs = torch.mean(torch.stack(outputs, dim=0), dim=0, keepdim=True)
+                    # print(f"(probs / args.temp).shape : {(outputs / args.temp).shape}")
+                    # print(f"e_loss: {e_loss}")
+                    model.eval()
+
                 (args.em_coef * e_loss / (len(wavs))).backward(retain_graph=True)
 
             if 1 - args.em_coef > 0:
@@ -512,9 +573,398 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
                 gc.collect()
                 torch.cuda.empty_cache()
 
+    if "gce" in args.method:
+        q = 0.7
+        for i, wav in enumerate(wavs):
+            for sub_wav in torch.chunk(wav[:lens[i]], chunks=args.n_neighbors, dim=-1):
+                sub_wav = sub_wav.unsqueeze(0)
+                log_prob_tensor = model(sub_wav).logits
+
+                probs = torch.softmax(log_prob_tensor / args.temp, dim=-1)
+                max_probs, _ = torch.max(probs, dim=-1, keepdim=False)
+
+                # if args.certain_only:
+                #     print(f"torch.softmax(log_prob_tensor, dim=-1): {torch.softmax(log_prob_tensor, dim=-1)}")
+                #     confidence, _ = torch.max(torch.softmax(log_prob_tensor, dim=-1), dim=-1, keepdim=True)
+                #     selected_tokens = torch.where(confidence > args.prob_threshold, 1, 0).squeeze(2).detach()
+                #     print(f"selected_tokens: {selected_tokens}")
+                #     print(f"selected_tokens.shape: {selected_tokens.shape}")
+                #     max_probs = selected_tokens * max_probs
+
+                # if args.not_blank:
+                #     predicted_ids = torch.argmax(probs, dim=-1)
+                #     non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
+                #     max_probs = non_blank * max_probs
+
+                # print(((1 - max_probs ** q) / q).shape)
+
+                gce_loss = torch.sum((1 - max_probs ** q) / q, dim=-1)
+                # print(f"gce_loss before: {gce_loss}")
+
+                # print(f"gce_loss.shape: {gce_loss.shape}")
+
+                gce_loss = gce_loss.mean()
+
+                # print(f"gce_loss: {gce_loss}")
+
+                (gce_loss / (len(wavs) * args.n_neighbors)).backward()
+
+                del sub_wav, log_prob_tensor, max_probs, gce_loss
+                gc.collect()
+                torch.cuda.empty_cache()
+
+    if 'ctc' in args.method:
+        import json
+        f = open('vocab.json')
+        vocab = json.load(f)
+
+        for i, wav in enumerate(wavs):
+            wav = wav[:lens[i]].unsqueeze(0)
+            outputs = model(wav).logits
+            ctc_loss = pseudo_labeling_loss(outputs, vocab, processor)
+
+            (ctc_loss / len(wavs)).backward()
+
+    if 'mixup' in args.method:
+        def get_pl_loss(outputs, transcription, vocab):
+            ctc_loss = nn.CTCLoss(blank=0, zero_infinity=False)
+            target = []
+            for s in transcription:
+                if s == ' ':
+                    s = '|'
+                target.append(vocab[s])
+            logp = outputs.log_softmax(1).transpose(1, 0) # L,N,D
+            input_len = logp.shape[0]
+            tgt_len = len(target)
+            loss = ctc_loss(logp, torch.tensor(target).int(), torch.tensor([input_len]), torch.tensor([tgt_len]))            
+            return loss
+
+        from itertools import combinations
+        combs = list(combinations(range(len(wavs)), 2))
+
+        import json
+        f = open('vocab.json')
+        vocab = json.load(f)
+
+        for i, j in combs:
+            mix_ratio = Beta(torch.FloatTensor([2]), torch.FloatTensor([2])).sample().item()
+
+            wav_i = wavs[i][:lens[i]].unsqueeze(0)
+            wav_j = wavs[j][:lens[j]].unsqueeze(0)
+            output_i = model(wav_i).logits
+            output_j = model(wav_j).logits
+
+            predicted_ids_i = torch.argmax(output_i, dim=-1)
+            transcription_i = processor.batch_decode(predicted_ids_i)[0]
+            predicted_ids_j = torch.argmax(output_j, dim=-1)
+            transcription_j = processor.batch_decode(predicted_ids_j)[0]
+
+            mixed_wav = (mix_ratio) * wavs[i].unsqueeze(0) + (1 - mix_ratio) * wavs[j].unsqueeze(0)
+            mixed_output = model(mixed_wav).logits
+
+            ctc_loss_i = get_pl_loss(mixed_output, transcription_i, vocab)
+            ctc_loss_j = get_pl_loss(mixed_output, transcription_j, vocab)
+
+            ((mix_ratio * ctc_loss_i + (1 - mix_ratio) * ctc_loss_j) / len(combs)).backward()
+
+    if 'beam_search_max' in args.method or 'beam_search_all' in args.method:
+        for i, wav in enumerate(wavs):
+            wav = wav[:lens[i]].unsqueeze(0)
+            outputs = model(wav).logits
+            predicted_ids = torch.argmax(outputs, dim=-1)
+            non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
+
+            import json
+            f = open('vocab.json')
+            vocab = json.load(f)
+            ctc_loss = nn.CTCLoss(blank=0, zero_infinity=False)
+
+            # print(f"PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=True): {PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=True)}")
+
+            # word_offset_dict_list = PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=True).word_offsets
+            # word_offset_dict_list = PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=10, output_word_offsets=True).word_offsets
+
+            # print(f"word_offset_dict_list: {word_offset_dict_list}")
+
+            # print(f"PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=False): {PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=False)}")
+
+            if 'beam_search_max' in args.method:
+                # beam_search_output = PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=True)
+
+                if args.not_blank:
+                    crietrion = nn.CrossEntropyLoss(ignore_index=0)
+                else:
+                    crietrion = nn.CrossEntropyLoss()
+
+                logits = outputs.squeeze(0).detach().cpu().numpy()
+
+                PROCESSOR_WITH_LM.decoder._check_logits_dimension(logits)
+                # prepare hotword input
+                hotword_scorer = HotwordScorer.build_scorer(None, weight=DEFAULT_HOTWORD_WEIGHT)
+                # make sure we have log probs as input
+                if math.isclose(logits.sum(axis=1).mean(), 1):
+                    # input looks like probabilities, so take log
+                    logits = np.log(np.clip(logits, MIN_TOKEN_CLIP_P, 1))
+                else:
+                    # convert logits into log probs
+                    logits = np.clip(_log_softmax(logits, axis=1), np.log(MIN_TOKEN_CLIP_P), 0)
+
+                beam_search_output = decode_beams_ctc(
+                    PROCESSOR_WITH_LM.decoder,
+                    logits=logits,
+                    beam_width=1,
+                    beam_prune_logp=DEFAULT_PRUNE_LOGP,
+                    token_min_logp=DEFAULT_MIN_TOKEN_LOGP,
+                    prune_history=DEFAULT_PRUNE_BEAMS,
+                    hotword_scorer=hotword_scorer,
+                    lm_start_state=None,
+                )
+                char_history = [*beam_search_output[0][-1]]
+                char_history = ["<pad>" if char == "|" or char == " " else char for char in char_history]
+                char_history = torch.tensor([vocab[char] for char in char_history]).to(args.device)
+
+                if args.certain_only:
+                    selected_frame = []
+                    for frame_idx, (output, char_idx) in enumerate(zip(outputs.squeeze(0), char_history)):
+                        probs = torch.softmax(output, dim=-1)
+                        if probs[char_idx] > args.prob_threshold:
+                            selected_frame.append(frame_idx)
+
+                    outputs, char_history = outputs.squeeze(0)[selected_frame].unsqueeze(0), char_history[selected_frame]
+
+                loss = crietrion(outputs.squeeze(0) / args.temp, char_history)
+                (loss / len(wavs)).backward(retain_graph=True)
+
+                # logp = outputs.log_softmax(1).transpose(1, 0) # L,N,D
+                # target = []
+                # for char in beam_search_output.text:
+                #     if char == ' ':
+                #         char = '|'
+                #     target.append(vocab[char])
+                # input_len = logp.shape[0]
+                # tgt_len = len(target)
+
+                # loss = ctc_loss(logp, torch.tensor(target).int(), torch.tensor([input_len]), torch.tensor([tgt_len]))
+                # (loss / (len(wavs))).backward(retain_graph=True)
+
+            if 'beam_search_all' in args.method:
+                if args.not_blank:
+                    crietrion = nn.CrossEntropyLoss(ignore_index=0)
+                else:
+                    crietrion = nn.CrossEntropyLoss()
+
+                logits = outputs.squeeze(0).detach().cpu().numpy()
+
+                PROCESSOR_WITH_LM.decoder._check_logits_dimension(logits)
+                # prepare hotword input
+                hotword_scorer = HotwordScorer.build_scorer(None, weight=DEFAULT_HOTWORD_WEIGHT)
+                # make sure we have log probs as input
+                if math.isclose(logits.sum(axis=1).mean(), 1):
+                    # input looks like probabilities, so take log
+                    logits = np.log(np.clip(logits, MIN_TOKEN_CLIP_P, 1))
+                else:
+                    # convert logits into log probs
+                    logits = np.clip(_log_softmax(logits, axis=1), np.log(MIN_TOKEN_CLIP_P), 0)
+
+                beam_search_outputs = decode_beams_ctc(
+                    PROCESSOR_WITH_LM.decoder,
+                    logits=logits,
+                    beam_width=10,
+                    beam_prune_logp=DEFAULT_PRUNE_LOGP,
+                    token_min_logp=DEFAULT_MIN_TOKEN_LOGP,
+                    prune_history=DEFAULT_PRUNE_BEAMS,
+                    hotword_scorer=hotword_scorer,
+                    lm_start_state=None,
+                )
+                loss_weights = torch.softmax(torch.tensor([beam_search_output[-2] for beam_search_output in beam_search_outputs]), dim=-1)
+
+                # char_histories = []
+                # for beam_search_output in beam_search_outputs:
+                #     char_history = [*beam_search_output[-1]]
+                #     char_history = ["<pad>" if char == "|" or char == " " else char for char in char_history]
+                #     char_history = F.one_hot(torch.tensor([vocab[char] for char in char_history]), num_classes=outputs.shape[-1])
+                #     char_histories.append(char_history)
+                # char_histories = torch.stack(char_histories, dim=0)
+                # one_hots = torch.sum(loss_weights.view(-1, 1, 1) * char_histories, dim=0)
+
+                # loss = crietrion(outputs.squeeze(0) / args.temp, one_hots)
+                # (loss / len(wavs)).backward(retain_graph=True)
+
+                for out_idx, beam_search_output in enumerate(beam_search_outputs):
+                    char_history = [*beam_search_output[-1]]
+                    char_history = ["<pad>" if char == "|" or char == " " else char for char in char_history]
+                    char_history = torch.tensor([vocab[char] for char in char_history]).to(args.device)
+
+                    loss = crietrion(outputs.squeeze(0) / args.temp, char_history)
+                    (loss * loss_weights[out_idx] / len(wavs)).backward(retain_graph=True)
+    if 'beam_search_negative_sampling' in args.method:
+        if args.not_blank:
+            crietrion = nn.CrossEntropyLoss(ignore_index=0)
+        else:
+            crietrion = nn.CrossEntropyLoss()
+
+        for i, wav in enumerate(wavs):
+            wav = wav[:lens[i]].unsqueeze(0)
+            outputs = model(wav).logits
+
+            import json
+            f = open('vocab.json')
+            vocab = json.load(f)
+            ctc_loss = nn.CTCLoss(blank=0, zero_infinity=False)
+
+            logits = outputs.squeeze(0).detach().cpu().numpy()
+
+            PROCESSOR_WITH_LM.decoder._check_logits_dimension(logits)
+            # prepare hotword input
+            hotword_scorer = HotwordScorer.build_scorer(None, weight=DEFAULT_HOTWORD_WEIGHT)
+            # make sure we have log probs as input
+            if math.isclose(logits.sum(axis=1).mean(), 1):
+                # input looks like probabilities, so take log
+                logits = np.log(np.clip(logits, MIN_TOKEN_CLIP_P, 1))
+            else:
+                # convert logits into log probs
+                logits = np.clip(_log_softmax(logits, axis=1), np.log(MIN_TOKEN_CLIP_P), 0)
+
+            BEAM_WIDTH = 40
+            NUM_NEGATIVES = 10
+
+            beam_search_outputs = decode_beams_ctc(
+                PROCESSOR_WITH_LM.decoder,
+                logits=logits,
+                beam_width=BEAM_WIDTH,
+                beam_prune_logp=DEFAULT_PRUNE_LOGP,
+                token_min_logp=DEFAULT_MIN_TOKEN_LOGP,
+                prune_history=DEFAULT_PRUNE_BEAMS,
+                hotword_scorer=hotword_scorer,
+                lm_start_state=None,
+            )
+            char_history = [*beam_search_outputs[0][-1]]
+            char_history = ["<pad>" if char == "|" or char == " " else char for char in char_history]
+            char_history = torch.tensor([vocab[char] for char in char_history]).to(args.device)
+
+            if args.certain_only:
+                selected_frame = []
+                for frame_idx, (output, char_idx) in enumerate(zip(outputs.squeeze(0), char_history)):
+                    probs = torch.softmax(output, dim=-1)
+                    if probs[char_idx] > args.prob_threshold:
+                        selected_frame.append(frame_idx)
+
+                positive_outputs, positive_char_history = outputs.squeeze(0)[selected_frame].unsqueeze(0), char_history[selected_frame]
+            else:
+                positive_outputs, positive_char_history = outputs, char_history
+
+            loss = crietrion(positive_outputs.squeeze(0) / args.temp, positive_char_history)
+            (loss / len(wavs)).backward(retain_graph=True)
+
+            if args.negative_sampling_method == "random":
+                for _ in range(NUM_NEGATIVES):
+                    negative_char_history = torch.randint(high=len(vocab), size=(len(beam_search_outputs[0][-1]), )).to(args.device)
+
+                    negative_mask = (negative_char_history != char_history) & (char_history != 0)
+
+                    negative_outputs = []
+                    for output, mask in zip(outputs.squeeze(0), negative_mask):
+                        if mask:
+                            negative_outputs.append(output)
+                    if len(negative_outputs) > 0:
+                        negative_outputs = torch.stack(negative_outputs).unsqueeze(0)
+                        negative_char_history = torch.masked_select(negative_char_history, negative_mask)
+
+                        loss = crietrion(negative_outputs.squeeze(0) / args.temp, negative_char_history)
+                        (- loss / (NUM_NEGATIVES * len(wavs))).backward(retain_graph=True)
+            elif args.negative_sampling_method == "beam_candidate":
+                for out_idx in range(len(beam_search_outputs))[-NUM_NEGATIVES:]:
+                    negative_char_history = [*beam_search_outputs[out_idx][-1]]
+                    negative_char_history = ["<pad>" if char == "|" or char == " " else char for char in negative_char_history]
+                    negative_char_history = torch.tensor([vocab[char] for char in negative_char_history]).to(args.device)
+
+                    negative_mask = (negative_char_history != char_history) & (char_history != 0)
+
+                    negative_outputs = []
+                    for output, mask in zip(outputs.squeeze(0), negative_mask):
+                        if mask:
+                            negative_outputs.append(output)
+                    if len(negative_outputs) > 0:
+                        negative_outputs = torch.stack(negative_outputs).unsqueeze(0)
+                        negative_char_history = torch.masked_select(negative_char_history, negative_mask)
+
+                        loss = crietrion(negative_outputs.squeeze(0) / args.temp, negative_char_history)
+                        (- loss / (NUM_NEGATIVES * len(wavs))).backward(retain_graph=True)
+    if 'beam_em_mix' in args.method:
+        for i, wav in enumerate(wavs):
+            wav = wav[:lens[i]].unsqueeze(0)
+            outputs = model(wav).logits
+
+            import json
+            f = open('vocab.json')
+            vocab = json.load(f)
+
+            crietrion = nn.CrossEntropyLoss(ignore_index=0, reduction='none')
+            logits = outputs.squeeze(0).detach().cpu().numpy()
+
+            PROCESSOR_WITH_LM.decoder._check_logits_dimension(logits)
+            # prepare hotword input
+            hotword_scorer = HotwordScorer.build_scorer(None, weight=DEFAULT_HOTWORD_WEIGHT)
+            # make sure we have log probs as input
+            if math.isclose(logits.sum(axis=1).mean(), 1):
+                # input looks like probabilities, so take log
+                logits = np.log(np.clip(logits, MIN_TOKEN_CLIP_P, 1))
+            else:
+                # convert logits into log probs
+                logits = np.clip(_log_softmax(logits, axis=1), np.log(MIN_TOKEN_CLIP_P), 0)
+
+            beam_search_output = decode_beams_ctc(
+                PROCESSOR_WITH_LM.decoder,
+                logits=logits,
+                beam_width=10,
+                beam_prune_logp=DEFAULT_PRUNE_LOGP,
+                token_min_logp=DEFAULT_MIN_TOKEN_LOGP,
+                prune_history=DEFAULT_PRUNE_BEAMS,
+                hotword_scorer=hotword_scorer,
+                lm_start_state=None,
+            )
+            char_history = [*beam_search_output[0][-1]]
+            char_history = ["<pad>" if char == "|" or char == " " else char for char in char_history]
+            char_history = torch.tensor([vocab[char] for char in char_history]).to(args.device)
+
+            predicted_ids = torch.argmax(char_history, dim=-1)
+            non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
+
+            num_classes = outputs.shape[-1]
+            ENTROPY_MIN, ENTROPY_MAX = 0, num_classes * (- (1 / num_classes) * np.log(1 / num_classes))
+
+            entropy = (softmax_entropy(outputs / args.temp, dim=-1) - ENTROPY_MIN) / (ENTROPY_MAX - ENTROPY_MIN)
+            entropy = entropy.detach()
+
+            pseudo_label_loss = crietrion(outputs.squeeze(0) / args.temp, char_history)
+            # entropy_loss = softmax_entropy(outputs / args.temp)[non_blank].mean(0).mean()
+            entropy_loss = softmax_entropy(outputs / args.temp)
+
+            # print(f"entropy[non_blank]: {entropy[non_blank]}")
+            # print(f"pseudo_label_loss: {pseudo_label_loss.shape}")
+            # print(f"entropy_loss: {entropy_loss.shape}")
+            # print(f"pseudo_label_loss: {pseudo_label_loss}")
+            # print(f"entropy_loss: {entropy_loss}")
+
+            loss = (1 - entropy) * pseudo_label_loss + entropy * entropy_loss
+            loss = loss[non_blank].mean()
+            (loss / len(wavs)).backward(retain_graph=True)
+    if 'diversity_maximization' in args.method:
+        for i, wav in enumerate(wavs):
+            wav = wav[:lens[i]].unsqueeze(0)
+            outputs = model(wav).logits
+            predicted_ids = torch.argmax(outputs, dim=-1)
+            non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
+            probs = torch.softmax(outputs[non_blank] / args.temp, dim=-1)
+            mean_prob = torch.mean(probs, dim=0)
+            loss = torch.sum(mean_prob * torch.log(mean_prob))
+            (args.dm_coef * loss / len(wavs)).backward(retain_graph=True)
+
     optimizer.step()
     if scheduler is not None:
         scheduler.step()
+
+    # print(f"step time: {time.time() - current}")
 
 
 def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens, adapter=None, step_idx=None):
@@ -525,12 +975,46 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
 
     if "original" in args.method or "em_uncertainty" in args.method or "em_sparse" in args.method:
         for i, wav in enumerate(wavs):
+            # print(f"lens[i] : {lens[i]}")
             wav = wav.unsqueeze(0)[:lens[i]]
             log_probs_lst = forward_attn(args, model, greedy_searcher, wav)
 
-            log_prob_tensor = torch.stack(log_probs_lst, dim=1)
+            # print(f"forward time: {time.time() - current}")
+            # current = time.time()
+
+            log_prob_tensor = torch.stack(log_probs_lst, dim=1).to(args.device)
+            print(f"log_probs_tensor: {log_prob_tensor}")
+
+            print(f"log_prob_tensor.shape: {log_prob_tensor.shape}")
+
+            # print(f"1: {time.time() - current}")
+            # current = time.time()
+
+            print(f"type(log_prob_tensor): {type(log_prob_tensor)}")
+            print(f"log_prob_tensor.dtype: {log_prob_tensor.dtype}")
+
+            print(f"model.device: {model.device}")
+
             predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
+
+            print(f"predicted_ids: {predicted_ids}")
+
+            # print(f"model.mods.decoder.device: {model.mods.decoder.device}")
+
+            # predicted_tokens, scores = model.mods.decoder(log_prob_tensor, torch.FloatTensor(lens))
+            # predicted_words = [
+            #     model.tokenizer.decode_ids(token_seq)
+            #     for token_seq in predicted_tokens
+            # ]
+            # print(predicted_words)
+
+            # print(f"2: {time.time() - current}")
+            # current = time.time()
+
             non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
+
+            # print(f"3: {time.time() - current}")
+            # current = time.time()
 
             if args.em_coef > 0:
                 if "original" in args.method:
@@ -541,11 +1025,19 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
                 elif "em_sparse" in args.method:
                     selected_frame = torch.where(softmax_entropy(log_prob_tensor, dim=-1) < args.entropy_threshold, 1, 0).bool()
                     e_loss = softmax_entropy(log_prob_tensor / args.temp)[selected_frame].mean(0).mean()
-                (args.em_coef / len(wavs) * e_loss).backward(retain_graph=True)
+
+                # print(f"4(backward): {time.time() - current}")
+                # current = time.time()
+
+                (args.em_coef / wavs.shape[0] * e_loss).backward(retain_graph=True)
 
             if 1 - args.em_coef > 0:
                 c_loss = mcc_loss(log_prob_tensor / args.temp, reweight=args.reweight, class_num=1000)
-                ((1 - args.em_coef) / len(wavs) * c_loss).backward(retain_graph=True)
+                ((1 - args.em_coef) / wavs.shape[0] * c_loss).backward(retain_graph=True)
+
+            # print(f"loss calculating time: {time.time() - current}")
+            # current = time.time()
+
     if "cr" in args.method:
         weak_augmentation_list, strong_augmentation_list = get_augmentation(args)
         seq_loss = lambda x, y, z: speechbrain.nnet.losses.nll_loss(x, y, z, label_smoothing=0.1)
@@ -766,17 +1258,32 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
 
             ns_loss = non_saturating_loss(log_prob_tensor)
             (ns_loss / len(wavs)).backward()
+
+    # print(f"lotimizer step: {time.time() - current}")
+    # current = time.time()
+
     optimizer.step()
-    if scheduler is not None: 
+    if scheduler is not None:
         scheduler.step()
+
+    # print(f"step time: {time.time() - current}")
 
 
 def forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens):
     optimizer.zero_grad()
+
+    current = time.time()
+
     if "original" in args.method or "em_uncertainty" in args.method or "em_sparse" in args.method:
         for i, wav in enumerate(wavs):
             wav = wav[:lens[i]].unsqueeze(0)
+            # print(f"lens[i] : {lens[i]}")
+
             log_probs_lst = forward_trans(args, model, wav, torch.tensor([lens[i]]).to(wav.device), gt_wavs=None)
+
+            # print(f"forward time: {time.time() - current}")
+            # current = time.time()
+
             log_prob_tensor = torch.stack(log_probs_lst, dim=1)
             if args.em_coef > 0:
                 if "original" in args.method:
@@ -853,10 +1360,152 @@ def forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, sc
 
             nll_loss = - sum_log_probs.mean()
             (nll_loss / len(wavs)).backward()
+    if 'beam_search_max' in args.method or 'beam_search_all' in args.method:
+        for i, wav in enumerate(wavs):
+            wav = wav[:lens[i]].unsqueeze(0)
+
+            encoder_output, encoded_lengths = model(input_signal=wav, input_signal_length=torch.tensor([lens[i]]).to(wav.device))
+            encoder_output = encoder_output.transpose(1, 2)
+            logitlen = encoded_lengths
+
+            # print(f"PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=True): {PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=True)}")
+
+            # word_offset_dict_list = PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=True).word_offsets
+            # word_offset_dict_list = PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=10, output_word_offsets=True).word_offsets
+
+            # print(f"word_offset_dict_list: {word_offset_dict_list}")
+
+            # print(f"PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=False): {PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=False)}")
+
+            beam_search_decoder = BeamRNNTInfer(
+                model.decoding.decoding.decoder,
+                model.decoding.decoding.joint,
+                beam_size=10,
+                return_best_hypothesis=False,
+            )
+
+            decoded_outputs = decode_beams_trans(beam_search_decoder, encoder_output, logitlen)
+            print(f"before!!!")
+            print(f"decoded_outputs: {decoded_outputs}")
+            print(f"after!!!")
+
+            # score: float
+            # y_sequence: Union[List[int], torch.Tensor]
+            # text: Optional[str] = None
+            # dec_out: Optional[List[torch.Tensor]] = None
+            # dec_state: Optional[Union[List[List[torch.Tensor]], List[torch.Tensor]]] = None
+            # timestep: Union[List[int], torch.Tensor] = field(default_factory=list)
+            # alignments: Optional[Union[List[int], List[List[int]]]] = None
+            # length: Union[int, torch.Tensor] = 0
+            # y: List[torch.tensor] = None
+            # lm_state: Optional[Union[Dict[str, Any], List[Any]]] = None
+            # lm_scores: Optional[torch.Tensor] = None
+            # tokens: Optional[Union[List[int], torch.Tensor]] = None
+            # last_token: Optional[torch.Tensor] = None
+
+            for decoded_output in decoded_outputs:
+                print(f"decoded_output.y_sequence[0]: {decoded_output.y_sequence[0]}")
+                print(f"decoded_output.length: {decoded_output.length}")
+                print(f"decoded_output.text: {decoded_output.text}")
+                print(f"decoded_output: {decoded_output.y_sequence}")
+
+            # if 'beam_search_max' in args.method:
+            #     # beam_search_output = PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=True)
+
+            #     crietrion = nn.CrossEntropyLoss(ignore_index=0)
+            #     # crietrion = nn.CrossEntropyLoss()
+
+            #     logits = outputs.squeeze(0).detach().cpu().numpy()
+
+            #     PROCESSOR_WITH_LM.decoder._check_logits_dimension(logits)
+            #     # prepare hotword input
+            #     hotword_scorer = HotwordScorer.build_scorer(None, weight=DEFAULT_HOTWORD_WEIGHT)
+            #     # make sure we have log probs as input
+            #     if math.isclose(logits.sum(axis=1).mean(), 1):
+            #         # input looks like probabilities, so take log
+            #         logits = np.log(np.clip(logits, MIN_TOKEN_CLIP_P, 1))
+            #     else:
+            #         # convert logits into log probs
+            #         logits = np.clip(_log_softmax(logits, axis=1), np.log(MIN_TOKEN_CLIP_P), 0)
+
+            #     beam_search_output = decode_beams_ctc(
+            #         PROCESSOR_WITH_LM.decoder,
+            #         logits=outputs.squeeze(0).detach().cpu().numpy(),
+            #         beam_width=1,
+            #         beam_prune_logp=DEFAULT_PRUNE_LOGP,
+            #         token_min_logp=DEFAULT_MIN_TOKEN_LOGP,
+            #         prune_history=DEFAULT_PRUNE_BEAMS,
+            #         hotword_scorer=hotword_scorer,
+            #         lm_start_state=None,
+            #     )
+            #     char_history = [*beam_search_output[0][-1]]
+            #     char_history = ["<pad>" if char == "|" or char == " " else char for char in char_history]
+            #     char_history = torch.tensor([vocab[char] for char in char_history]).to(args.device)
+
+            #     loss = crietrion(outputs.squeeze(0) / args.temp, char_history)
+            #     (loss / len(wavs)).backward(retain_graph=True)
+
+            #     # logp = outputs.log_softmax(1).transpose(1, 0) # L,N,D
+            #     # target = []
+            #     # for char in beam_search_output.text:
+            #     #     if char == ' ':
+            #     #         char = '|'
+            #     #     target.append(vocab[char])
+            #     # input_len = logp.shape[0]
+            #     # tgt_len = len(target)
+
+            #     # loss = ctc_loss(logp, torch.tensor(target).int(), torch.tensor([input_len]), torch.tensor([tgt_len]))
+            #     # (loss / (len(wavs))).backward(retain_graph=True)
+
+            # if 'beam_search_all' in args.method:
+            #     crietrion = nn.CrossEntropyLoss(ignore_index=0)
+            #     # crietrion = nn.CrossEntropyLoss()
+
+            #     logits = outputs.squeeze(0).detach().cpu().numpy()
+
+            #     PROCESSOR_WITH_LM.decoder._check_logits_dimension(logits)
+            #     # prepare hotword input
+            #     hotword_scorer = HotwordScorer.build_scorer(None, weight=DEFAULT_HOTWORD_WEIGHT)
+            #     # make sure we have log probs as input
+            #     if math.isclose(logits.sum(axis=1).mean(), 1):
+            #         # input looks like probabilities, so take log
+            #         logits = np.log(np.clip(logits, MIN_TOKEN_CLIP_P, 1))
+            #     else:
+            #         # convert logits into log probs
+            #         logits = np.clip(_log_softmax(logits, axis=1), np.log(MIN_TOKEN_CLIP_P), 0)
+
+            #     beam_search_outputs = decode_beams_ctc(
+            #         PROCESSOR_WITH_LM.decoder,
+            #         logits=outputs.squeeze(0).detach().cpu().numpy(),
+            #         beam_width=10,
+            #         beam_prune_logp=DEFAULT_PRUNE_LOGP,
+            #         token_min_logp=DEFAULT_MIN_TOKEN_LOGP,
+            #         prune_history=DEFAULT_PRUNE_BEAMS,
+            #         hotword_scorer=hotword_scorer,
+            #         lm_start_state=None,
+            #     )
+            #     loss_weights = torch.softmax(torch.tensor([beam_search_output[-2] for beam_search_output in beam_search_outputs]), dim=-1)
+
+            #     for out_idx, beam_search_output in enumerate(beam_search_outputs):
+            #         char_history = [*beam_search_output[-1]]
+            #         char_history = ["<pad>" if char == "|" or char == " " else char for char in char_history]
+            #         char_history = torch.tensor([vocab[char] for char in char_history]).to(args.device)
+
+            #         loss = crietrion(outputs.squeeze(0) / args.temp, char_history)
+            #         (loss * loss_weights[out_idx] / len(wavs)).backward(retain_graph=True)
+
+    # optimizer.step()
+    # if scheduler is not None:
+    #     scheduler.step()
+
+    # print(f"backward time: {time.time() - current}")
+    # current = time.time()
 
     optimizer.step()
     if scheduler is not None:
         scheduler.step()
+
+    # print(f"step time: {time.time() - current}")
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
@@ -926,6 +1575,9 @@ def main(args):
         original_model_state, original_optimizer_state, original_scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
     for batch_idx, batch in enumerate(dataset):
+        # if batch_idx * batch_size >= 300:
+        #     break
+
         lens, wavs, texts, _ = batch
 
         # print("start!!!")
@@ -992,34 +1644,29 @@ def main(args):
         # print(f"wavs_to_adapt : {wavs_to_adapt}")
         # print(f"lens_to_adapt : {lens_to_adapt}")
 
-        if batch_size == 1 and batch_idx % 4 != 3 and use_memory_queue and not isinstance(model, EncoderDecoderASR):
-            for wav, prob in zip(wavs, probs):
-                while len(memory_queue) >= args.queue_size:
-                    _ = memory_queue.popleft()[0]
-                memory_queue.append((wav.cpu().detach(), prob.cpu().detach(), str(hash(wav.cpu().detach()))))
-            continue
-
-        # print(f"wavs[-1, :].shape : {wavs[-1].unsqueeze(0).shape}")
-        # print(f"list((texts[-1])) : {list((texts[-1]))}")
-        # print(f"texts: {texts}")
-        # logger.info(f"wavs[-1] : {wavs[-1]}")
-        # logger.info(f"texts[-1] : {texts[-1]}")
-        # logger.info(f"lens[-1] : {lens[-1]}")
+        # if batch_size == 1 and batch_idx % 4 != 3 and use_memory_queue and not isinstance(model, EncoderDecoderASR):
+        #     for wav, prob in zip(wavs, probs):
+        #         while len(memory_queue) >= args.queue_size:
+        #             _ = memory_queue.popleft()[0]
+        #         memory_queue.append((wav.cpu().detach(), prob.cpu().detach(), str(hash(wav.cpu().detach()))))
+        #     continue
 
         # gt_texts.extend(texts)
         # ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
-        gt_texts.extend([texts[-1]])
-        ori_transcription = transcribe_batch(args, original_model, processor, wavs[-1].unsqueeze(0), lens[-1].unsqueeze(0))
+        # gt_texts.extend([texts[-1]])
+        # ori_transcription = transcribe_batch(args, original_model, processor, wavs[-1].unsqueeze(0), lens[-1].unsqueeze(0))
+
+        gt_texts.extend(texts)
+        ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
         ori_transcriptions.extend(ori_transcription)
 
         # print(f"wavs[-1].unsqueeze(0) : {wavs[-1].unsqueeze(0)}")
         # print(f"lens[-1].unsqueeze(0) : {lens[-1].unsqueeze(0)}")
-
         # print(f"list(texts[-1]) : {list(texts[-1])}")
         # print(f"list(ori_transcription) : {list(ori_transcription)}")
+        # ori_wer = wer(list([texts[-1]]), list(ori_transcription))
 
-        ori_wer = wer(list([texts[-1]]), list(ori_transcription))
-
+        ori_wer = wer(list(texts), list(ori_transcription))
         logger.info(f"{batch_idx}/{len(dataset)}")
         logger.info(f"gt text: {list(texts)}")
         logger.info(f"original WER: {ori_wer}")
@@ -1045,6 +1692,7 @@ def main(args):
             adapter = None
 
         for step_idx in range(1, steps + 1):
+            current = time.time()
             if adapt_or_not:
                 if isinstance(model, Wav2Vec2ForCTC): # ctc
                     forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt)
@@ -1052,13 +1700,17 @@ def main(args):
                     forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt, adapter=adapter, step_idx=step_idx)
                 elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel): # transducer
                     forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt)
+            # print(f"one forward and adapt: {time.time() - current}")
+
 
             if step_idx in [1, 3, 5, 10, 20, 40]:
-                transcription = transcribe_batch(args, model, processor, wavs[-1].unsqueeze(0), lens[-1].unsqueeze(0))
+                # transcription = transcribe_batch(args, model, processor, wavs[-1].unsqueeze(0), lens[-1].unsqueeze(0))
+                transcription = transcribe_batch(args, model, processor, wavs, lens)
                 transcription_list = eval(f"transcriptions_{step_idx}")
                 transcription_list.extend(transcription)
 
-                ada_wer = wer(list([texts[-1]]), list(transcription))
+                # ada_wer = wer(list([texts[-1]]), list(transcription))
+                ada_wer = wer(list(texts), list(transcription))
                 logger.info(f"adapt-{step_idx} WER: {ada_wer}")
                 logger.info(f"adapt-{step_idx} text: {' '.join(list(transcription))}")
 
@@ -1095,4 +1747,5 @@ def main(args):
 
 
 if __name__ == '__main__':
+    PROCESSOR_WITH_LM = Wav2Vec2ProcessorWithLM.from_pretrained("patrickvonplaten/wav2vec2-base-100h-with-lm")
     main()
