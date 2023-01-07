@@ -67,7 +67,7 @@ stochastic_restoration: false
 restore_prob: 0.01
 
 # device
-device: cpu
+device: cuda
 
 # logging
 log_dir: exps/test
