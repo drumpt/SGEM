@@ -63,6 +63,35 @@ EMPTY_START_BEAM = ("", "", "", None, [], NULL_FRAMES, 0.0, "")
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis, NBestHypotheses, is_prefix, select_k_expansions
 
 
+def transcribe_batch(args, model, processor, wavs, lens):
+    transcription = []
+    with torch.no_grad():
+        if isinstance(model, Wav2Vec2ForCTC):
+            for wav, len in zip(wavs, lens):
+                wav = wav[:len].unsqueeze(0)
+                outputs = model(wav).logits
+                predicted_ids = torch.argmax(outputs, dim=-1)
+                text = processor.batch_decode(predicted_ids)
+                transcription.append(text[0])
+        elif isinstance(model, EncoderDecoderASR):
+            for wav, len in zip(wavs, lens):
+                wav = wav[:len].unsqueeze(0)
+                text = model.transcribe_batch(wav, wav_lens=torch.ones(1).to(args.device))[0]
+                transcription.append(text[0])
+        elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel): # conformer from nemo
+            for wav, len in zip(wavs, lens):
+                wav = wav[:len].unsqueeze(0)
+                len = len.unsqueeze(0)
+
+                encoded_feature, encoded_len = model(input_signal=wav, input_signal_length=len)
+                best_hyp_texts, _ = model.decoding.rnnt_decoder_predictions_tensor(
+                    encoder_output=encoded_feature, encoded_lengths=encoded_len, return_hypotheses=False
+                )
+                text = [best_hyp_text.upper() for best_hyp_text in best_hyp_texts][0]
+                transcription.append(text)
+    return transcription
+
+
 def forward_attn(args, model, greedy_searcher, wavs, gt_wavs=None):
     log_probs_lst = []
 
