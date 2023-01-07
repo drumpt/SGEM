@@ -282,37 +282,6 @@ def load_model_and_optimizer(model, optimizer, scheduler, model_state, optimizer
         return model, optimizer, None
 
 
-def transcribe_batch(args, model, processor, wavs, lens):
-    with torch.no_grad():
-        if isinstance(model, Wav2Vec2ForCTC):
-            transcription = []
-            for wav, len in zip(wavs, lens):
-                wav = wav[:len].unsqueeze(0)
-                outputs = model(wav).logits
-                predicted_ids = torch.argmax(outputs, dim=-1)
-                text = processor.batch_decode(predicted_ids)
-                transcription.append(text[0])
-        elif isinstance(model, EncoderDecoderASR):
-            transcription = []
-            for wav, len in zip(wavs, lens):
-                wav = wav[:len].unsqueeze(0)
-                text = model.transcribe_batch(wav, wav_lens=torch.ones(1).to(args.device))[0]
-                transcription.append(text[0])
-        elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel): # conformer from nemo
-            transcription = []
-            for wav, len in zip(wavs, lens):
-                wav = wav[:len].unsqueeze(0)
-                len = len.unsqueeze(0)
-
-                encoded_feature, encoded_len = model(input_signal=wav, input_signal_length=len)
-                best_hyp_texts, _ = model.decoding.rnnt_decoder_predictions_tensor(
-                    encoder_output=encoded_feature, encoded_lengths=encoded_len, return_hypotheses=False
-                )
-                text = [best_hyp_text.upper() for best_hyp_text in best_hyp_texts][0]
-                transcription.append(text)
-    return transcription
-
-
 def softmax_entropy(x, dim=-1):
     return -(x.softmax(dim) * x.log_softmax(dim)).sum(dim)
 
@@ -457,7 +426,6 @@ def get_instance_from_queue(args, method, wavs, probs):
     if len(out_wavs) > 0:
         out_wavs = pad_sequence(out_wavs, batch_first=True)
     return out_wavs, out_lens, out_hash_values
-    # return out_wavs, out_hash_values
 
 
 def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens):
@@ -480,11 +448,9 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
                         e_loss = softmax_entropy(outputs / args.temp).mean(0).mean() 
                 elif "em_uncertainty" in args.method:
                     if args.not_blank:
-                        # frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)[non_blank]), p=1, dim=-1).detach()
                         frame_weight = F.normalize(softmax_entropy(outputs)[non_blank], p=1, dim=-1).detach()
                         e_loss = torch.sum(frame_weight * softmax_entropy(outputs / args.temp)[non_blank], dim=-1).mean()
                     else:
-                        # frame_weight = F.normalize(torch.reciprocal(softmax_entropy(outputs)), dim=-1).detach()
                         frame_weight = F.normalize(softmax_entropy(outputs), dim=-1).detach()
                         e_loss = torch.sum(frame_weight * softmax_entropy(outputs / args.temp), dim=-1).mean()
                 elif "em_sparse" in args.method:
@@ -497,15 +463,9 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
                 elif "memo_dropout" in args.method:
                     e_loss = 0
                     model.train()
-                    # outputs = []
                     for _ in range(5):
                         outputs = model(wav).logits
-                        # predicted_ids = torch.argmax(output, dim=-1)
-                        # outputs.append(output.squeeze(0))
                         e_loss += (softmax_entropy(outputs / args.temp)[non_blank].mean(0).mean()) / 5
-                    # outputs = torch.mean(torch.stack(outputs, dim=0), dim=0, keepdim=True)
-                    # print(f"(probs / args.temp).shape : {(outputs / args.temp).shape}")
-                    # print(f"e_loss: {e_loss}")
                     model.eval()
 
                 (args.em_coef * e_loss / (len(wavs))).backward(retain_graph=True)
@@ -583,30 +543,17 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
                 probs = torch.softmax(log_prob_tensor / args.temp, dim=-1)
                 max_probs, _ = torch.max(probs, dim=-1, keepdim=False)
 
-                # if args.certain_only:
-                #     print(f"torch.softmax(log_prob_tensor, dim=-1): {torch.softmax(log_prob_tensor, dim=-1)}")
-                #     confidence, _ = torch.max(torch.softmax(log_prob_tensor, dim=-1), dim=-1, keepdim=True)
-                #     selected_tokens = torch.where(confidence > args.prob_threshold, 1, 0).squeeze(2).detach()
-                #     print(f"selected_tokens: {selected_tokens}")
-                #     print(f"selected_tokens.shape: {selected_tokens.shape}")
-                #     max_probs = selected_tokens * max_probs
+                if args.certain_only:
+                    confidence, _ = torch.max(torch.softmax(log_prob_tensor, dim=-1), dim=-1, keepdim=True)
+                    selected_tokens = torch.where(confidence > args.prob_threshold, 1, 0).squeeze(2).detach()
+                    max_probs = selected_tokens * max_probs
 
-                # if args.not_blank:
-                #     predicted_ids = torch.argmax(probs, dim=-1)
-                #     non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
-                #     max_probs = non_blank * max_probs
+                if args.not_blank:
+                    predicted_ids = torch.argmax(probs, dim=-1)
+                    non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
+                    max_probs = non_blank * max_probs
 
-                # print(((1 - max_probs ** q) / q).shape)
-
-                gce_loss = torch.sum((1 - max_probs ** q) / q, dim=-1)
-                # print(f"gce_loss before: {gce_loss}")
-
-                # print(f"gce_loss.shape: {gce_loss.shape}")
-
-                gce_loss = gce_loss.mean()
-
-                # print(f"gce_loss: {gce_loss}")
-
+                gce_loss = torch.mean((1 - max_probs ** q) / q, dim=-1)
                 (gce_loss / (len(wavs) * args.n_neighbors)).backward()
 
                 del sub_wav, log_prob_tensor, max_probs, gce_loss
@@ -679,15 +626,6 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
             vocab = json.load(f)
             ctc_loss = nn.CTCLoss(blank=0, zero_infinity=False)
 
-            # print(f"PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=True): {PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=True)}")
-
-            # word_offset_dict_list = PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=True).word_offsets
-            # word_offset_dict_list = PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=10, output_word_offsets=True).word_offsets
-
-            # print(f"word_offset_dict_list: {word_offset_dict_list}")
-
-            # print(f"PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=False): {PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=False)}")
-
             if 'beam_search_max' in args.method:
                 # beam_search_output = PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=True)
 
@@ -697,17 +635,17 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
                     crietrion = nn.CrossEntropyLoss()
 
                 logits = outputs.squeeze(0).detach().cpu().numpy()
-
-                PROCESSOR_WITH_LM.decoder._check_logits_dimension(logits)
-                # prepare hotword input
                 hotword_scorer = HotwordScorer.build_scorer(None, weight=DEFAULT_HOTWORD_WEIGHT)
+                PROCESSOR_WITH_LM.decoder._check_logits_dimension(logits)
+
+                # prepare hotword input
                 # make sure we have log probs as input
-                if math.isclose(logits.sum(axis=1).mean(), 1):
-                    # input looks like probabilities, so take log
-                    logits = np.log(np.clip(logits, MIN_TOKEN_CLIP_P, 1))
-                else:
-                    # convert logits into log probs
-                    logits = np.clip(_log_softmax(logits, axis=1), np.log(MIN_TOKEN_CLIP_P), 0)
+                # if math.isclose(logits.sum(axis=1).mean(), 1):
+                #     # input looks like probabilities, so take log
+                #     logits = np.log(np.clip(logits, MIN_TOKEN_CLIP_P, 1))
+                # else:
+                #     # convert logits into log probs
+                #     logits = np.clip(_log_softmax(logits, axis=1), np.log(MIN_TOKEN_CLIP_P), 0)
 
                 beam_search_output = decode_beams_ctc(
                     PROCESSOR_WITH_LM.decoder,
@@ -735,18 +673,6 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
                 loss = crietrion(outputs.squeeze(0) / args.temp, char_history)
                 (loss / len(wavs)).backward(retain_graph=True)
 
-                # logp = outputs.log_softmax(1).transpose(1, 0) # L,N,D
-                # target = []
-                # for char in beam_search_output.text:
-                #     if char == ' ':
-                #         char = '|'
-                #     target.append(vocab[char])
-                # input_len = logp.shape[0]
-                # tgt_len = len(target)
-
-                # loss = ctc_loss(logp, torch.tensor(target).int(), torch.tensor([input_len]), torch.tensor([tgt_len]))
-                # (loss / (len(wavs))).backward(retain_graph=True)
-
             if 'beam_search_all' in args.method:
                 if args.not_blank:
                     crietrion = nn.CrossEntropyLoss(ignore_index=0)
@@ -754,17 +680,17 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
                     crietrion = nn.CrossEntropyLoss()
 
                 logits = outputs.squeeze(0).detach().cpu().numpy()
-
-                PROCESSOR_WITH_LM.decoder._check_logits_dimension(logits)
-                # prepare hotword input
                 hotword_scorer = HotwordScorer.build_scorer(None, weight=DEFAULT_HOTWORD_WEIGHT)
-                # make sure we have log probs as input
-                if math.isclose(logits.sum(axis=1).mean(), 1):
-                    # input looks like probabilities, so take log
-                    logits = np.log(np.clip(logits, MIN_TOKEN_CLIP_P, 1))
-                else:
-                    # convert logits into log probs
-                    logits = np.clip(_log_softmax(logits, axis=1), np.log(MIN_TOKEN_CLIP_P), 0)
+                PROCESSOR_WITH_LM.decoder._check_logits_dimension(logits)
+
+                # # prepare hotword input
+                # # make sure we have log probs as input
+                # if math.isclose(logits.sum(axis=1).mean(), 1):
+                #     # input looks like probabilities, so take log
+                #     logits = np.log(np.clip(logits, MIN_TOKEN_CLIP_P, 1))
+                # else:
+                #     # convert logits into log probs
+                #     logits = np.clip(_log_softmax(logits, axis=1), np.log(MIN_TOKEN_CLIP_P), 0)
 
                 beam_search_outputs = decode_beams_ctc(
                     PROCESSOR_WITH_LM.decoder,
@@ -790,13 +716,15 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
                 # loss = crietrion(outputs.squeeze(0) / args.temp, one_hots)
                 # (loss / len(wavs)).backward(retain_graph=True)
 
+                loss = 0
                 for out_idx, beam_search_output in enumerate(beam_search_outputs):
                     char_history = [*beam_search_output[-1]]
                     char_history = ["<pad>" if char == "|" or char == " " else char for char in char_history]
                     char_history = torch.tensor([vocab[char] for char in char_history]).to(args.device)
 
-                    loss = crietrion(outputs.squeeze(0) / args.temp, char_history)
-                    (loss * loss_weights[out_idx] / len(wavs)).backward(retain_graph=True)
+                    loss += loss_weights[out_idx] * crietrion(outputs.squeeze(0) / args.temp, char_history)
+                    # (loss * loss_weights[out_idx] / len(wavs)).backward(retain_graph=True)
+                (loss / len(wavs)).backward(retain_graph=True)
     if 'beam_search_negative_sampling' in args.method:
         if args.not_blank:
             crietrion = nn.CrossEntropyLoss(ignore_index=0)
@@ -810,20 +738,19 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
             import json
             f = open('vocab.json')
             vocab = json.load(f)
-            ctc_loss = nn.CTCLoss(blank=0, zero_infinity=False)
 
             logits = outputs.squeeze(0).detach().cpu().numpy()
-
-            PROCESSOR_WITH_LM.decoder._check_logits_dimension(logits)
-            # prepare hotword input
             hotword_scorer = HotwordScorer.build_scorer(None, weight=DEFAULT_HOTWORD_WEIGHT)
+            PROCESSOR_WITH_LM.decoder._check_logits_dimension(logits)
+
+            # prepare hotword input
             # make sure we have log probs as input
-            if math.isclose(logits.sum(axis=1).mean(), 1):
-                # input looks like probabilities, so take log
-                logits = np.log(np.clip(logits, MIN_TOKEN_CLIP_P, 1))
-            else:
-                # convert logits into log probs
-                logits = np.clip(_log_softmax(logits, axis=1), np.log(MIN_TOKEN_CLIP_P), 0)
+            # if math.isclose(logits.sum(axis=1).mean(), 1):
+            #     # input looks like probabilities, so take log
+            #     logits = np.log(np.clip(logits, MIN_TOKEN_CLIP_P, 1))
+            # else:
+            #     # convert logits into log probs
+            #     logits = np.clip(_log_softmax(logits, axis=1), np.log(MIN_TOKEN_CLIP_P), 0)
 
             BEAM_WIDTH = 40
             NUM_NEGATIVES = 10
@@ -856,10 +783,10 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
             loss = crietrion(positive_outputs.squeeze(0) / args.temp, positive_char_history)
             (loss / len(wavs)).backward(retain_graph=True)
 
+            negative_loss = 0
             if args.negative_sampling_method == "random":
                 for _ in range(NUM_NEGATIVES):
                     negative_char_history = torch.randint(high=len(vocab), size=(len(beam_search_outputs[0][-1]), )).to(args.device)
-
                     negative_mask = (negative_char_history != char_history) & (char_history != 0)
 
                     negative_outputs = []
@@ -870,13 +797,18 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
                         negative_outputs = torch.stack(negative_outputs).unsqueeze(0)
                         negative_char_history = torch.masked_select(negative_char_history, negative_mask)
 
-                        loss = crietrion(negative_outputs.squeeze(0) / args.temp, negative_char_history)
-                        (- loss / (NUM_NEGATIVES * len(wavs))).backward(retain_graph=True)
+                        negative_loss += -crietrion(negative_outputs.squeeze(0) / args.temp, negative_char_history) / NUM_NEGATIVES
+                        # (- loss / (NUM_NEGATIVES * len(wavs))).backward(retain_graph=True)
             elif args.negative_sampling_method == "beam_candidate":
                 for out_idx in range(len(beam_search_outputs))[-NUM_NEGATIVES:]:
                     negative_char_history = [*beam_search_outputs[out_idx][-1]]
+
+                    print(f"negative_char_history_before: {negative_char_history}")
+
                     negative_char_history = ["<pad>" if char == "|" or char == " " else char for char in negative_char_history]
                     negative_char_history = torch.tensor([vocab[char] for char in negative_char_history]).to(args.device)
+
+                    print(f"negative_char_history_after: {negative_char_history}")
 
                     negative_mask = (negative_char_history != char_history) & (char_history != 0)
 
@@ -888,8 +820,10 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
                         negative_outputs = torch.stack(negative_outputs).unsqueeze(0)
                         negative_char_history = torch.masked_select(negative_char_history, negative_mask)
 
-                        loss = crietrion(negative_outputs.squeeze(0) / args.temp, negative_char_history)
-                        (- loss / (NUM_NEGATIVES * len(wavs))).backward(retain_graph=True)
+                        negative_loss += -crietrion(negative_outputs.squeeze(0) / args.temp, negative_char_history) / NUM_NEGATIVES
+                        # (- loss / (NUM_NEGATIVES * len(wavs))).backward(retain_graph=True)
+            if torch.is_tensor(negative_loss):
+                (negative_loss / len(wavs)).backward(retain_graph=True)
     if 'beam_em_mix' in args.method:
         for i, wav in enumerate(wavs):
             wav = wav[:lens[i]].unsqueeze(0)
@@ -902,16 +836,16 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
             crietrion = nn.CrossEntropyLoss(ignore_index=0, reduction='none')
             logits = outputs.squeeze(0).detach().cpu().numpy()
 
-            PROCESSOR_WITH_LM.decoder._check_logits_dimension(logits)
-            # prepare hotword input
-            hotword_scorer = HotwordScorer.build_scorer(None, weight=DEFAULT_HOTWORD_WEIGHT)
-            # make sure we have log probs as input
-            if math.isclose(logits.sum(axis=1).mean(), 1):
-                # input looks like probabilities, so take log
-                logits = np.log(np.clip(logits, MIN_TOKEN_CLIP_P, 1))
-            else:
-                # convert logits into log probs
-                logits = np.clip(_log_softmax(logits, axis=1), np.log(MIN_TOKEN_CLIP_P), 0)
+            # PROCESSOR_WITH_LM.decoder._check_logits_dimension(logits)
+            # # prepare hotword input
+            # hotword_scorer = HotwordScorer.build_scorer(None, weight=DEFAULT_HOTWORD_WEIGHT)
+            # # make sure we have log probs as input
+            # if math.isclose(logits.sum(axis=1).mean(), 1):
+            #     # input looks like probabilities, so take log
+            #     logits = np.log(np.clip(logits, MIN_TOKEN_CLIP_P, 1))
+            # else:
+            #     # convert logits into log probs
+            #     logits = np.clip(_log_softmax(logits, axis=1), np.log(MIN_TOKEN_CLIP_P), 0)
 
             beam_search_output = decode_beams_ctc(
                 PROCESSOR_WITH_LM.decoder,
@@ -937,14 +871,7 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
             entropy = entropy.detach()
 
             pseudo_label_loss = crietrion(outputs.squeeze(0) / args.temp, char_history)
-            # entropy_loss = softmax_entropy(outputs / args.temp)[non_blank].mean(0).mean()
             entropy_loss = softmax_entropy(outputs / args.temp)
-
-            # print(f"entropy[non_blank]: {entropy[non_blank]}")
-            # print(f"pseudo_label_loss: {pseudo_label_loss.shape}")
-            # print(f"entropy_loss: {entropy_loss.shape}")
-            # print(f"pseudo_label_loss: {pseudo_label_loss}")
-            # print(f"entropy_loss: {entropy_loss}")
 
             loss = (1 - entropy) * pseudo_label_loss + entropy * entropy_loss
             loss = loss[non_blank].mean()
@@ -964,57 +891,19 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
     if scheduler is not None:
         scheduler.step()
 
-    # print(f"step time: {time.time() - current}")
-
 
 def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens, adapter=None, step_idx=None):
     greedy_searcher = S2SRNNGreedySearcher(model.mods.decoder.emb, model.mods.decoder.dec, model.mods.decoder.fc, **{"bos_index": model.mods.decoder.bos_index, "eos_index": model.mods.decoder.eos_index, "min_decode_ratio": model.mods.decoder.min_decode_ratio, "max_decode_ratio": model.mods.decoder.max_decode_ratio,},).to(args.device).train()
     optimizer.zero_grad()
 
-    current = time.time()
-
     if "original" in args.method or "em_uncertainty" in args.method or "em_sparse" in args.method:
         for i, wav in enumerate(wavs):
-            # print(f"lens[i] : {lens[i]}")
             wav = wav.unsqueeze(0)[:lens[i]]
             log_probs_lst = forward_attn(args, model, greedy_searcher, wav)
-
-            # print(f"forward time: {time.time() - current}")
-            # current = time.time()
-
             log_prob_tensor = torch.stack(log_probs_lst, dim=1).to(args.device)
-            print(f"log_probs_tensor: {log_prob_tensor}")
-
-            print(f"log_prob_tensor.shape: {log_prob_tensor.shape}")
-
-            # print(f"1: {time.time() - current}")
-            # current = time.time()
-
-            print(f"type(log_prob_tensor): {type(log_prob_tensor)}")
-            print(f"log_prob_tensor.dtype: {log_prob_tensor.dtype}")
-
-            print(f"model.device: {model.device}")
 
             predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
-
-            print(f"predicted_ids: {predicted_ids}")
-
-            # print(f"model.mods.decoder.device: {model.mods.decoder.device}")
-
-            # predicted_tokens, scores = model.mods.decoder(log_prob_tensor, torch.FloatTensor(lens))
-            # predicted_words = [
-            #     model.tokenizer.decode_ids(token_seq)
-            #     for token_seq in predicted_tokens
-            # ]
-            # print(predicted_words)
-
-            # print(f"2: {time.time() - current}")
-            # current = time.time()
-
             non_blank = torch.where(predicted_ids != 0, 1, 0).bool()
-
-            # print(f"3: {time.time() - current}")
-            # current = time.time()
 
             if args.em_coef > 0:
                 if "original" in args.method:
@@ -1026,17 +915,11 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
                     selected_frame = torch.where(softmax_entropy(log_prob_tensor, dim=-1) < args.entropy_threshold, 1, 0).bool()
                     e_loss = softmax_entropy(log_prob_tensor / args.temp)[selected_frame].mean(0).mean()
 
-                # print(f"4(backward): {time.time() - current}")
-                # current = time.time()
-
                 (args.em_coef / wavs.shape[0] * e_loss).backward(retain_graph=True)
 
             if 1 - args.em_coef > 0:
                 c_loss = mcc_loss(log_prob_tensor / args.temp, reweight=args.reweight, class_num=1000)
                 ((1 - args.em_coef) / wavs.shape[0] * c_loss).backward(retain_graph=True)
-
-            # print(f"loss calculating time: {time.time() - current}")
-            # current = time.time()
 
     if "cr" in args.method:
         weak_augmentation_list, strong_augmentation_list = get_augmentation(args)
@@ -1259,32 +1142,20 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
             ns_loss = non_saturating_loss(log_prob_tensor)
             (ns_loss / len(wavs)).backward()
 
-    # print(f"lotimizer step: {time.time() - current}")
-    # current = time.time()
-
     optimizer.step()
     if scheduler is not None:
         scheduler.step()
-
-    # print(f"step time: {time.time() - current}")
 
 
 def forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, scheduler, wavs, lens):
     optimizer.zero_grad()
 
-    current = time.time()
-
     if "original" in args.method or "em_uncertainty" in args.method or "em_sparse" in args.method:
         for i, wav in enumerate(wavs):
             wav = wav[:lens[i]].unsqueeze(0)
-            # print(f"lens[i] : {lens[i]}")
-
             log_probs_lst = forward_trans(args, model, wav, torch.tensor([lens[i]]).to(wav.device), gt_wavs=None)
-
-            # print(f"forward time: {time.time() - current}")
-            # current = time.time()
-
             log_prob_tensor = torch.stack(log_probs_lst, dim=1)
+
             if args.em_coef > 0:
                 if "original" in args.method:
                     e_loss = softmax_entropy(log_prob_tensor / args.temp, dim=-1).mean(0).mean()
@@ -1367,15 +1238,6 @@ def forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, sc
             encoder_output, encoded_lengths = model(input_signal=wav, input_signal_length=torch.tensor([lens[i]]).to(wav.device))
             encoder_output = encoder_output.transpose(1, 2)
             logitlen = encoded_lengths
-
-            # print(f"PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=True): {PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=True)}")
-
-            # word_offset_dict_list = PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=True).word_offsets
-            # word_offset_dict_list = PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=10, output_word_offsets=True).word_offsets
-
-            # print(f"word_offset_dict_list: {word_offset_dict_list}")
-
-            # print(f"PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=False): {PROCESSOR_WITH_LM.decode(logits=outputs.squeeze(0).detach().cpu().numpy(), beam_width=1, output_word_offsets=False)}")
 
             beam_search_decoder = BeamRNNTInfer(
                 model.decoding.decoding.decoder,
@@ -1494,18 +1356,9 @@ def forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, sc
             #         loss = crietrion(outputs.squeeze(0) / args.temp, char_history)
             #         (loss * loss_weights[out_idx] / len(wavs)).backward(retain_graph=True)
 
-    # optimizer.step()
-    # if scheduler is not None:
-    #     scheduler.step()
-
-    # print(f"backward time: {time.time() - current}")
-    # current = time.time()
-
     optimizer.step()
     if scheduler is not None:
         scheduler.step()
-
-    # print(f"step time: {time.time() - current}")
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
@@ -1575,25 +1428,13 @@ def main(args):
         original_model_state, original_optimizer_state, original_scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
     for batch_idx, batch in enumerate(dataset):
-        # if batch_idx * batch_size >= 300:
-        #     break
-
         lens, wavs, texts, _ = batch
-
-        # print("start!!!")
-        # print(f"wavs : {wavs}")
-        # print(f"lens : {lens}")
-        # print("end!!!")
 
         if isinstance(model, Wav2Vec2ForCTC):
             wavs = processor(wavs, sampling_rate=16000, return_tensors="pt", padding="longest").input_values.to(args.device)
         else:
             wavs = pad_sequence([torch.from_numpy(wav) for wav in wavs], batch_first=True).to(args.device)
         lens = lens.to(args.device)
-
-        # print(f"wavs[-1] : {wavs[-1]}")
-        # print(f"texts[-1] : {texts[-1]}")
-        # print(f"lens[-1] : {lens[-1]}")
 
         adapt_or_not = True
         with torch.no_grad():
@@ -1641,30 +1482,9 @@ def main(args):
                 wavs_to_adapt = wavs
                 lens_to_adapt = lens
 
-        # print(f"wavs_to_adapt : {wavs_to_adapt}")
-        # print(f"lens_to_adapt : {lens_to_adapt}")
-
-        # if batch_size == 1 and batch_idx % 4 != 3 and use_memory_queue and not isinstance(model, EncoderDecoderASR):
-        #     for wav, prob in zip(wavs, probs):
-        #         while len(memory_queue) >= args.queue_size:
-        #             _ = memory_queue.popleft()[0]
-        #         memory_queue.append((wav.cpu().detach(), prob.cpu().detach(), str(hash(wav.cpu().detach()))))
-        #     continue
-
-        # gt_texts.extend(texts)
-        # ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
-        # gt_texts.extend([texts[-1]])
-        # ori_transcription = transcribe_batch(args, original_model, processor, wavs[-1].unsqueeze(0), lens[-1].unsqueeze(0))
-
         gt_texts.extend(texts)
         ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
         ori_transcriptions.extend(ori_transcription)
-
-        # print(f"wavs[-1].unsqueeze(0) : {wavs[-1].unsqueeze(0)}")
-        # print(f"lens[-1].unsqueeze(0) : {lens[-1].unsqueeze(0)}")
-        # print(f"list(texts[-1]) : {list(texts[-1])}")
-        # print(f"list(ori_transcription) : {list(ori_transcription)}")
-        # ori_wer = wer(list([texts[-1]]), list(ori_transcription))
 
         ori_wer = wer(list(texts), list(ori_transcription))
         logger.info(f"{batch_idx}/{len(dataset)}")
@@ -1700,16 +1520,12 @@ def main(args):
                     forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt, adapter=adapter, step_idx=step_idx)
                 elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel): # transducer
                     forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt)
-            # print(f"one forward and adapt: {time.time() - current}")
-
 
             if step_idx in [1, 3, 5, 10, 20, 40]:
-                # transcription = transcribe_batch(args, model, processor, wavs[-1].unsqueeze(0), lens[-1].unsqueeze(0))
                 transcription = transcribe_batch(args, model, processor, wavs, lens)
                 transcription_list = eval(f"transcriptions_{step_idx}")
                 transcription_list.extend(transcription)
 
-                # ada_wer = wer(list([texts[-1]]), list(transcription))
                 ada_wer = wer(list(texts), list(transcription))
                 logger.info(f"adapt-{step_idx} WER: {ada_wer}")
                 logger.info(f"adapt-{step_idx} text: {' '.join(list(transcription))}")
