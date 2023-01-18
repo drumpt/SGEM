@@ -10,6 +10,10 @@ import torch
 torch.backends.cudnn.enabled = False
 torch.backends.cudnn.deterministic = True
 
+from transformers import Wav2Vec2ForCTC
+from speechbrain.pretrained import EncoderDecoderASR
+import nemo.collections.asr as nemo_asr
+
 from nemo.collections.asr.parts.utils import rnnt_utils
 from nemo.collections.common.parts.rnn import label_collate
 from audio_augmentations import *
@@ -60,7 +64,7 @@ NULL_FRAMES: Frames = (-1, -1)  # placeholder that gets replaced with positive i
 EMPTY_START_BEAM = ("", "", "", None, [], NULL_FRAMES, 0.0, "")
 
 
-from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis, NBestHypotheses, is_prefix, select_k_expansions
+# from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis, NBestHypotheses, is_prefix, select_k_expansions
 
 
 def transcribe_batch(args, model, processor, wavs, lens):
@@ -95,13 +99,8 @@ def transcribe_batch(args, model, processor, wavs, lens):
 def forward_attn(args, model, greedy_searcher, wavs, gt_wavs=None):
     log_probs_lst = []
 
-    # current = time.time()
-
     enc_states = model.encode_batch(wavs, wav_lens=torch.ones(len(wavs)).to(args.device))
     enc_lens = torch.tensor([enc_states.shape[1]]).to(args.device)
-
-    # print(f"forward encode: {time.time() - current}")
-    # current = time.time()
 
     device = enc_states.device
     batch_size = enc_states.shape[0]
@@ -136,24 +135,18 @@ def forward_attn(args, model, greedy_searcher, wavs, gt_wavs=None):
                 gt_inp_tokens = gt_log_probs.argmax(dim=-1)
 
             log_probs_lst.append(log_probs)
-
-    # print(f"forward decode: {time.time() - current}")
-
-    return log_probs_lst
+    # return log_probs_lst
+    log_probs_tensor = torch.stack(log_probs_lst, dim=1).to(args.device)
+    return log_probs_tensor
 
 
 def forward_trans(args, model, wavs, lens, gt_wavs=None):
     log_probs_lst = []
 
     if gt_wavs == None:
-        # current = time.time()
-
         encoder_output, encoded_lengths = model(input_signal=wavs, input_signal_length=lens)
         encoder_output = encoder_output.transpose(1, 2)
         logitlen = encoded_lengths
-
-        # print(f"forward encode : {time.time() - current}")
-        # current = time.time()
 
         inseq = encoder_output  # [B, T, D]
         x, out_len, device = inseq, logitlen, inseq.device
@@ -412,10 +405,9 @@ def forward_trans(args, model, wavs, lens, gt_wavs=None):
                             gt_hypotheses[kidx].timestep.append(time_idx)
                             gt_hypotheses[kidx].score += float(gt_v[kidx])
                     gt_symbols_added += 1
-
-    # print(f"forward decode : {time.time() - current}")
-
-    return log_probs_lst
+    # return log_probs_lst
+    log_probs_tensor = torch.stack(log_probs_lst, dim=1).to(args.device)
+    return log_probs_tensor
 
 
 def decode_beams_ctc(
@@ -565,9 +557,19 @@ def decode_beams_ctc(
         for text, next_word, word_part, last_char, frame_list, frames, logit_score, char_history in beams:
             # fast token merge
             new_text = _merge_tokens(text, next_word)
+
+            # print(f"text, new_text, next_word: {text}, {new_text}, {next_word}")
+            # print(f"next_word: {next_word}")
+            # print(f"word_part, last_char, frame_list, frames, logit_score, char_history: {word_part}, {last_char}, {frame_list}, {frames}, {logit_score}, {char_history}")
+
             if new_text not in cached_lm_scores:
                 _, prev_raw_lm_score, start_state = cached_lm_scores[text]
                 score, end_state = language_model.score(start_state, next_word, is_last_word=is_eos)
+
+                # from pyctcdecode.language_model import LanguageModel
+                # print(f"type(language_model): {type(language_model)}")
+                # print(f"language_model.__dict__: {language_model.__dict__}")
+
                 raw_lm_score = prev_raw_lm_score + score
                 lm_hw_score = raw_lm_score + hotword_scorer.score(new_text)
                 cached_lm_scores[new_text] = (lm_hw_score, raw_lm_score, end_state)
@@ -586,6 +588,8 @@ def decode_beams_ctc(
                         )
                 lm_score += cached_partial_token_scores[word_part]
 
+            # print(f"lm_score: {lm_score}")
+
             new_beams.append(
                 (
                     new_text,
@@ -599,7 +603,6 @@ def decode_beams_ctc(
                     char_history
                 )
             )
-
         return new_beams
 
     language_model = model._language_model
@@ -614,6 +617,7 @@ def decode_beams_ctc(
     beams = [EMPTY_START_BEAM]
     # bpe we can also have trailing word boundaries ▁⁇▁ so we may need to remember breaks
     force_next_break = False
+
     for frame_idx, logit_col in enumerate(logits):
         max_idx = logit_col.argmax()
         idx_list = set(np.where(logit_col >= token_min_logp)[0]) | {max_idx}
@@ -716,6 +720,8 @@ def decode_beams_ctc(
         # lm scoring and beam pruning
         new_beams = _merge_beams(new_beams)
 
+        # print(f"new_beams: {new_beams}")
+
         scored_beams = get_lm_beams(
             model,
             new_beams,
@@ -724,22 +730,13 @@ def decode_beams_ctc(
             cached_p_lm_scores,
         )
 
+        # print(f"scored_beams: {scored_beams}")
+
         # remove beam outliers
         max_score = max([b[-2] for b in scored_beams])
         scored_beams = [b for b in scored_beams if b[-2] >= max_score + beam_prune_logp]
-        # beam pruning by taking highest N prefixes and then filtering down
         trimmed_beams = _sort_and_trim_beams(scored_beams, beam_width)
-        # prune history and remove lm score from beams
-        # if prune_history:
-        #     lm_order = 1 if language_model is None else language_model.order
-        #     beams = _prune_history(trimmed_beams, lm_order=lm_order)
-        # else:
-        #     beams = trimmed_beams
-        #     beams = [b[:-2] for b in trimmed_beams]
         beams = [b[:-2] + (b[-1], ) for b in trimmed_beams]
-
-    # final lm scoring and sorting
-    # print(f"beams: {beams}")
 
     new_beams = []
     for text, _, word_part, _, frame_list, frames, logit_score, char_history in beams:
@@ -772,13 +769,141 @@ def decode_beams_ctc(
         )
         for text, _, _, _, text_frames, _, logit_score, combined_score, char_history in trimmed_beams
     ]
-
-    ### TOOD: remove (only for debugging)
-    # print(f"trimmed_beams: {trimmed_beams}")
-    # for text, _, _, char, text_frames, _, logit_score, combined_score in trimmed_beams:
-    #     print(f"char!!!: {char}")
-
     return output_beams
+
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import torch
+
+
+@dataclass
+class Hypothesis:
+    """Hypothesis class for beam search algorithms.
+
+    score: A float score obtained from an AbstractRNNTDecoder module's score_hypothesis method.
+
+    y_sequence: Either a sequence of integer ids pointing to some vocabulary, or a packed torch.Tensor
+        behaving in the same manner. dtype must be torch.Long in the latter case.
+
+    dec_state: A list (or list of list) of LSTM-RNN decoder states. Can be None.
+
+    text: (Optional) A decoded string after processing via CTC / RNN-T decoding (removing the CTC/RNNT
+        `blank` tokens, and optionally merging word-pieces). Should be used as decoded string for
+        Word Error Rate calculation.
+
+    timestep: (Optional) A list of integer indices representing at which index in the decoding
+        process did the token appear. Should be of same length as the number of non-blank tokens.
+
+    alignments: (Optional) Represents the CTC / RNNT token alignments as integer tokens along an axis of
+        time T (for CTC) or Time x Target (TxU).
+        For CTC, represented as a single list of integer indices.
+        For RNNT, represented as a dangling list of list of integer indices.
+        Outer list represents Time dimension (T), inner list represents Target dimension (U).
+        The set of valid indices **includes** the CTC / RNNT blank token in order to represent alignments.
+
+    length: Represents the length of the sequence (the original length without padding), otherwise
+        defaults to 0.
+
+    y: (Unused) A list of torch.Tensors representing the list of hypotheses.
+
+    lm_state: (Unused) A dictionary state cache used by an external Language Model.
+
+    lm_scores: (Unused) Score of the external Language Model.
+
+    tokens: (Optional) A list of decoded tokens (can be characters or word-pieces.
+
+    last_token (Optional): A token or batch of tokens which was predicted in the last step.
+    """
+
+    score: float
+    y_sequence: Union[List[int], torch.Tensor]
+    text: Optional[str] = None
+    dec_out: Optional[List[torch.Tensor]] = None
+    dec_state: Optional[Union[List[List[torch.Tensor]], List[torch.Tensor]]] = None
+    timestep: Union[List[int], torch.Tensor] = field(default_factory=list)
+    alignments: Optional[Union[List[int], List[List[int]]]] = None
+    length: Union[int, torch.Tensor] = 0
+    y: List[torch.tensor] = None
+    lm_state: Optional[Union[Dict[str, Any], List[Any]]] = None
+    lm_scores: Optional[torch.Tensor] = None
+    tokens: Optional[Union[List[int], torch.Tensor]] = None
+    last_token: Optional[torch.Tensor] = None
+    logit_list: List[torch.Tensor] = field(default_factory=list)
+    token_list: List = field(default_factory=list)
+
+
+@dataclass
+class NBestHypotheses:
+    """List of N best hypotheses"""
+
+    n_best_hypotheses: Optional[List[Hypothesis]]
+
+
+def is_prefix(x: List[int], pref: List[int]) -> bool:
+    """
+    Obtained from https://github.com/espnet/espnet.
+
+    Check if pref is a prefix of x.
+
+    Args:
+        x: Label ID sequence.
+        pref: Prefix label ID sequence.
+
+    Returns:
+        : Whether pref is a prefix of x.
+    """
+    if len(pref) >= len(x):
+        return False
+
+    for i in range(len(pref)):
+        if pref[i] != x[i]:
+            return False
+
+    return True
+
+
+def select_k_expansions(
+    hyps: List[Hypothesis], logps: torch.Tensor, beam_size: int, gamma: float, beta: int,
+) -> List[Tuple[int, Hypothesis]]:
+    """
+    Obtained from https://github.com/espnet/espnet
+
+    Return K hypotheses candidates for expansion from a list of hypothesis.
+    K candidates are selected according to the extended hypotheses probabilities
+    and a prune-by-value method. Where K is equal to beam_size + beta.
+
+    Args:
+        hyps: Hypotheses.
+        beam_logp: Log-probabilities for hypotheses expansions.
+        beam_size: Beam size.
+        gamma: Allowed logp difference for prune-by-value method.
+        beta: Number of additional candidates to store.
+
+    Return:
+        k_expansions: Best K expansion hypotheses candidates.
+    """
+    k_expansions = []
+
+    for i, hyp in enumerate(hyps):
+        hyp_i = [(int(k), hyp.score + float(logp)) for k, logp in enumerate(logps[i])]
+        k_best_exp_val = max(hyp_i, key=lambda x: x[1])
+
+        k_best_exp_idx = k_best_exp_val[0]
+        k_best_exp = k_best_exp_val[1]
+
+        expansions = sorted(filter(lambda x: (k_best_exp - gamma) <= x[1], hyp_i), key=lambda x: x[1],)[
+            : beam_size + beta
+        ]
+
+        if len(expansions) > 0:
+            k_expansions.append(expansions)
+        else:
+            k_expansions.append([(k_best_exp_idx, k_best_exp)])
+
+    return k_expansions
+
 
 
 def decode_beams_trans(
@@ -792,14 +917,22 @@ def decode_beams_trans(
     Returns:
         nbest_hyps: N-best decoding results
     """
+
+    import time
+    current = time.time()
+
     # Initialize states
     beam = min(model.beam_size, model.vocab_size)
     beam_k = min(beam, (model.vocab_size - 1))
+
     blank_tensor = torch.tensor([model.blank], device=h.device, dtype=torch.long)
 
     # Precompute some constants for blank position
     ids = list(range(model.vocab_size + 1))
     ids.remove(model.blank)
+
+    print(f"1: {time.time() - current}")
+    current = time.time()
 
     # Used when blank token is first vs last token
     if model.blank == 0:
@@ -811,8 +944,11 @@ def decode_beams_trans(
     dec_state = model.decoder.initialize_state(h)
 
     # Initialize first hypothesis for the beam (blank)
-    kept_hyps = [Hypothesis(score=0.0, y_sequence=[model.blank], dec_state=dec_state, timestep=[-1], length=0)]
+    kept_hyps = [Hypothesis(score=0.0, y_sequence=[model.blank], dec_state=dec_state, timestep=[-1], length=0, logit_list=[], token_list=[])]
     cache = {}
+
+    print(f"2: {time.time() - current}")
+    current = time.time()
 
     if partial_hypotheses is not None:
         if len(partial_hypotheses.y_sequence) > 0:
@@ -822,6 +958,12 @@ def decode_beams_trans(
 
     if model.preserve_alignments:
         kept_hyps[0].alignments = [[]]
+
+    print(f"3: {time.time() - current}")
+    current = time.time()
+
+    cnt = 0
+    token_min_logp = -5 # need to tune
 
     for i in range(int(encoded_lengths)):
         hi = h[:, i : i + 1, :]  # [1, 1, D]
@@ -836,11 +978,21 @@ def decode_beams_trans(
             y, state, lm_tokens = model.decoder.score_hypothesis(max_hyp, cache)  # [1, 1, D]
 
             # get next token
-            ytu = torch.log_softmax(model.joint.joint(hi, y) / model.softmax_temperature, dim=-1)  # [1, 1, 1, V + 1]
+            logit = model.joint.joint(hi, y) / model.softmax_temperature
+            ytu = torch.log_softmax(logit, dim=-1)  # [1, 1, 1, V + 1]
             ytu = ytu[0, 0, 0, :]  # [V + 1]
+
+            # print(f"torch.softmax(ytu, dim=-1): {torch.softmax(ytu, dim=-1)}")
 
             # remove blank token before top k
             top_k = ytu[ids].topk(beam_k, dim=-1)
+
+            if torch.max(top_k[0]) < token_min_logp:
+                top_k = (torch.masked_select(top_k[0], top_k[0] == torch.max(top_k[0])), torch.masked_select(top_k[1], top_k[0] == torch.max(top_k[0])))
+            else:
+                top_k = (torch.masked_select(top_k[0], top_k[0].ge(token_min_logp)), torch.masked_select(top_k[1], top_k[0].ge(token_min_logp)))
+
+            # print(f"top_k: {top_k}")
 
             # Two possible steps - blank token or non-blank token predicted
             ytu = (
@@ -848,8 +1000,13 @@ def decode_beams_trans(
                 torch.cat((top_k[1] + index_incr, blank_tensor)),
             )
 
+            print(f"4: {time.time() - current}")
+            current = time.time()
+
             # for each possible step
             for logp, k in zip(*ytu):
+                cnt += 1
+
                 # construct hypothesis for step
                 new_hyp = Hypothesis(
                     score=(max_hyp.score + float(logp)),
@@ -858,7 +1015,34 @@ def decode_beams_trans(
                     lm_state=max_hyp.lm_state,
                     timestep=max_hyp.timestep[:],
                     length=encoded_lengths,
+                    logit_list=max_hyp.logit_list+[logit[0, 0, 0, :]],
+                    token_list=max_hyp.token_list+[k],
                 )
+
+                # new_hyp = Hypothesis(
+                #     score=(max_hyp.score + float(logp)),
+                #     y_sequence=max_hyp.y_sequence[:],
+                #     dec_state=max_hyp.dec_state,
+                #     lm_state=max_hyp.lm_state,
+                #     timestep=max_hyp.timestep[:],
+                #     length=encoded_lengths,
+                #     logit_list=[],
+                #     token_list=max_hyp.token_list+[k],
+                # )
+
+                # new_hyp = Hypothesis(
+                #     score=(max_hyp.score + float(logp)),
+                #     y_sequence=max_hyp.y_sequence[:],
+                #     dec_state=max_hyp.dec_state,
+                #     lm_state=max_hyp.lm_state,
+                #     timestep=max_hyp.timestep[:],
+                #     length=encoded_lengths,
+                #     logit_list=[],
+                #     token_list=[],
+                # )
+
+                print(f"5: {time.time() - current}")
+                current = time.time()
 
                 if model.preserve_alignments:
                     new_hyp.alignments = copy.deepcopy(max_hyp.alignments)
@@ -880,6 +1064,9 @@ def decode_beams_trans(
                     else:
                         new_hyp.alignments[-1].append(new_hyp.y_sequence[-1])
 
+                print(f"6: {time.time() - current}")
+                current = time.time()
+
             # keep those hypothesis that have scores greater than next search generation
             hyps_max = float(max(hyps, key=lambda x: x.score).score)
             kept_most_prob = sorted([hyp for hyp in kept_hyps if hyp.score > hyps_max], key=lambda x: x.score,)
@@ -895,11 +1082,19 @@ def decode_beams_trans(
                 kept_hyps = kept_most_prob
                 break
 
+            print(f"7: {time.time() - current}")
+            current = time.time()
+
+    print(f"cnt: {cnt}")
+
     # Remove trailing empty list of alignments
     if model.preserve_alignments:
         for h in kept_hyps:
             if len(h.alignments[-1]) == 0:
                 del h.alignments[-1]
+
+    print(f"8: {time.time() - current}")
+    current = time.time()
 
     # Remove the original input label if partial hypothesis was provided
     if partial_hypotheses is not None:
@@ -907,6 +1102,7 @@ def decode_beams_trans(
             if hyp.y_sequence[0] == partial_hypotheses.y_sequence[-1] and len(hyp.y_sequence) > 1:
                 hyp.y_sequence = hyp.y_sequence[1:]
 
-    
+    print(f"9: {time.time() - current}")
+    current = time.time()
 
     return model.sort_nbest(kept_hyps)
