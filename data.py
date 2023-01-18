@@ -37,12 +37,6 @@ def collect_audio_batch(batch, extra_noise=0., maxLen=600000):
             audio_len.append(len(feat))
             text.append(b[1])
 
-    # Descending audio length within each batch
-    # audio_len, file, audio_feat, text = zip(*[(feat_len, f_name, feat, txt)
-    #                                           for feat_len, f_name, feat, txt in sorted(zip(audio_len, file, audio_feat, text), reverse=True, key=lambda x:x[0])])
-
-    # return torch.tensor(audio_len), torch.stack(audio_feat), text, file
-    # print(f"torch.tensor(audio_len) : {torch.tensor(audio_len)}")
     return torch.tensor(audio_len), audio_feat, text, file
 
 
