@@ -1,3 +1,5 @@
 **/__pycache__/
+pretrained_models/
 exps/
+outputs/
 conf/config.yaml
