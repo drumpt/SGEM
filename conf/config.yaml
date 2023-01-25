@@ -1,8 +1,10 @@
 ### model
-# asr: facebook/wav2vec2-base-960h
+asr: facebook/wav2vec2-base-960h
 # asr: speechbrain/asr-crdnn-rnnlm-librispeech
 # asr: speechbrain/asr-crdnn-transformerlm-librispeech
-asr: pretrained_models/stt_en_conformer_transducer_small.nemo
+# asr: speechbrain/asr-transformer-transformerlm-librispeech
+# asr: speechbrain/asr-conformersmall-transformerlm-librispeech
+# asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 # asr: pretrained_models/stt_en_conformer_transducer_large.nemo
 
 ### dataset
@@ -33,21 +35,23 @@ optimizer: AdamW
 scheduler: null
 lr: 2e-5
 steps: 10
-train_params: [all] # currently supported: all, feature, LN, linear(linear probing), da
+train_params: [all] # currently supported: all, feature, LN, linear(linear probing)
 bias_only: false
 episodic: true # load pretrained model for every batch
 
 ##################################################################
 ### methods & other hyperparameters
-method: [beam_search_max] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, p_logp, cr, cr_feature, da, contrastive_temporal, memo_dropout, gce, ctc, mixup, beam_search_max, beam_search_all, beam_search_negative_sampling, beam_em_mix, diversity_maximization, beam_search_em
+# currently supported methods: original(SUTA), em_uncertainty, em_sparse, em_joint, em_aug, cr,
+# em_dropout, gce, ctc, beam_search_max, beam_search_all, beam_search_negative_sampling, beam_em_mix, diversity_maximization, beam_search_em
+method: [beam_search_max]
+# TODO: use this for implementing greedy search and beam search
+decoding_method: greedy # greedy or beam_search
+
 temp: 2.5 # temperature smoothing
+em_coef: 0.3
 not_blank: true
 certain_only: true
-em_coef: 0.3
 reweight: true
-
-# TODO: use this for implementing greedy search and beam search
-forward_method: greedy # greedy or beam_search
 
 ### augmentation for consistency regularization
 num_augs: 1
