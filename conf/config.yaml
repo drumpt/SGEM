@@ -52,9 +52,9 @@ not_blank: true
 certain_only: true
 reweight: true
 
-### augmentation for consistency regularization
-num_augs: 1
-aug_method: augmix # augmix, standard
+### uncertainty aware pseudo-labeling
+prob_threshold: 0.9
+entropy_threshold: 0.05
 
 ### beam search and negative sampling
 beam_width: 10
@@ -66,28 +66,14 @@ ns_coef: 0.1
 ### diversity maximization
 dm_coef: 0.1
 
-### uncertainty aware pseudo-labeling
-prob_threshold: 0.3
-entropy_threshold: 0.05
+### augmentation for consistency regularization
+num_augs: 1
+aug_method: augmix # augmix, standard
 ##################################################################
 
 ### selective adaptation
 selective_adaptation: false
 ood_threshold: -0.45
-
-### memory queue
-use_memory_queue: false
-queue_method: latest # currently supported: random, latest, informative, similar
-queue_size: 3
-n_neighbors: 3
-
-### teacher-student model for non episodic adaptation
-teacher_student: false
-momentum: 0.99
-
-### restore pretrained model for non-episodic adaptation
-stochastic_restoration: false
-restore_prob: 0.01
 
 ### seed for reproductivity
 seed: 42
