@@ -322,45 +322,6 @@ def decode_ctc(
         return heapq.nlargest(beam_width, beams, key=lambda x: x[-2])
 
 
-    # def _prune_history(beams, lm_order: int):
-    #     """Filter out beams that are the same over max_ngram history.
-
-    #     Since n-gram language models have a finite history when scoring a new token, we can use that
-    #     fact to prune beams that only differ early on (more than n tokens in the past) and keep only the
-    #     higher scoring ones. Note that this helps speed up the decoding process but comes at the cost of
-    #     some amount of beam diversity. If more than the top beam is used in the output it should
-    #     potentially be disabled.
-    #     """
-    #     # let's keep at least 1 word of history
-    #     min_n_history = max(1, lm_order - 1)
-    #     seen_hashes = set()
-    #     filtered_beams = []
-    #     # for each beam after this, check if we need to add it
-    #     for (text, next_word, word_part, last_char, text_frames, part_frames, logit_score, idx_history) in beams:
-    #         # hash based on history that can still affect lm scoring going forward
-    #         hash_idx = (tuple(text.split()[-min_n_history:]), word_part, last_char)
-    #         if hash_idx not in seen_hashes:
-    #             filtered_beams.append(
-    #                 (
-    #                     text,
-    #                     next_word,
-    #                     word_part,
-    #                     last_char,
-    #                     text_frames,
-    #                     part_frames,
-    #                     logit_score,
-    #                     idx_history
-    #                 )
-    #             )
-    #             seen_hashes.add(hash_idx)
-    #     return filtered_beams
-
-
-    # def _normalize_whitespace(text: str) -> str:
-    #     """Efficiently normalize whitespace."""
-    #     return " ".join(text.split())
-
-
     def _merge_tokens(token_1: str, token_2: str) -> str:
         """Fast, whitespace safe merging of tokens."""
         if len(token_2) == 0:
@@ -499,6 +460,7 @@ def decode_ctc(
         """Update score by averaging logit_score and lm_score."""
         # get language model and see if exists
         language_model = model._language_model
+
         # if no language model available then return raw score + hotwords as lm score
         if language_model is None:
             new_beams = []
