@@ -384,11 +384,22 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             criterion = nn.CrossEntropyLoss(ignore_index=blank_index) if args.not_blank else nn.CrossEntropyLoss()
 
             wav = wav[:lens[i]].unsqueeze(0)
+
+            import time
+            current = time.time()
+
             outputs = forward_batch(args, model, wav, torch.FloatTensor([lens[i]]).to(wav.device))
+
+            print(f"forward time.time() - current : {time.time() - current}")
+            current = time.time()
+
             if 'beam_search_negative_sampling' in args.method:
                 negative_outputs = outputs.clone()
             encoder_output, encoder_length = encode_batch(args, model, wav, torch.FloatTensor([lens[i]]).to(wav.device))
             pseudo_labels = decode_batch(args, model, decoder_processor, encoder_output, encoder_length)
+
+            print(f"beam search time.time() - current : {time.time() - current}")
+            current = time.time()
 
             if 'beam_search_max' in args.method:
                 char_history = pseudo_labels[0].to(args.device)
@@ -472,9 +483,15 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             loss = torch.sum(mean_prob * torch.log(mean_prob))
             (args.dm_coef * loss / len(wavs)).backward(retain_graph=True)
 
+    print(f"loss cal and backprop time.time() - current : {time.time() - current}")
+    current = time.time()
+
     optimizer.step()
     if scheduler is not None:
         scheduler.step()
+
+    print(f"optimize time.time() - current : {time.time() - current}")
+    current = time.time()
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
@@ -518,7 +535,7 @@ def main(args):
 
     global decoder_processor
     if isinstance(model, Wav2Vec2ForCTC): # ctc
-        decoder_processor = Wav2Vec2ProcessorWithLM.from_pretrained("patrickvonplaten/wav2vec2-base-100h-with-lm").to(args.device)
+        decoder_processor = Wav2Vec2ProcessorWithLM.from_pretrained("patrickvonplaten/wav2vec2-base-100h-with-lm")
     elif isinstance(model, EncoderDecoderASR):
         decoder_processor = None
     elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
