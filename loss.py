@@ -57,15 +57,15 @@ def js_divergence(p1, p2):
     return loss
 
 
-def get_pl_loss(outputs, transcription, vocab):
-    ctc_loss = nn.CTCLoss(blank=0, zero_infinity=False)
-    target = []
-    for s in transcription:
-        if s == ' ':
-            s = '|'
-        target.append(vocab[s])
-    logp = outputs.log_softmax(1).transpose(1, 0) # L,N,D
-    input_len = logp.shape[0]
-    tgt_len = len(target)
-    loss = ctc_loss(logp, torch.tensor(target).int(), torch.tensor([input_len]), torch.tensor([tgt_len]))            
-    return loss
+# def get_pl_loss(outputs, transcription, vocab):
+#     ctc_loss = nn.CTCLoss(blank=0, zero_infinity=False)
+#     target = []
+#     for s in transcription:
+#         if s == ' ':
+#             s = '|'
+#         target.append(vocab[s])
+#     logp = outputs.log_softmax(1).transpose(1, 0) # L,N,D
+#     input_len = logp.shape[0]
+#     tgt_len = len(target)
+#     loss = ctc_loss(logp, torch.tensor(target).int(), torch.tensor([input_len]), torch.tensor([tgt_len]))            
+#     return loss

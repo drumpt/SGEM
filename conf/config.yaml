@@ -1,10 +1,10 @@
 ### model
-asr: facebook/wav2vec2-base-960h
+# asr: facebook/wav2vec2-base-960h
 # asr: speechbrain/asr-crdnn-rnnlm-librispeech
 # asr: speechbrain/asr-crdnn-transformerlm-librispeech
 # asr: speechbrain/asr-transformer-transformerlm-librispeech
 # asr: speechbrain/asr-conformersmall-transformerlm-librispeech
-# asr: pretrained_models/stt_en_conformer_transducer_small.nemo
+asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 # asr: pretrained_models/stt_en_conformer_transducer_large.nemo
 
 ### dataset
@@ -34,18 +34,17 @@ log_dir: exps/test
 optimizer: AdamW
 scheduler: null
 lr: 2e-5
-steps: 10
 train_params: [all] # currently supported: all, feature, LN, linear(linear probing)
+steps: 10
 bias_only: false
-episodic: true # load pretrained model for every batch
+episodic: true # load pretrained model again for every batch
 
 ##################################################################
 ### methods & other hyperparameters
-# currently supported methods: original(SUTA), em_uncertainty, em_sparse, em_joint, em_aug, cr,
+# currently supported methods: original(SUTA), em_uncertainty, em_sparse, greedy_pseudo_labeling, em_aug, cr,
 # em_dropout, gce, ctc, beam_search_max, beam_search_all, beam_search_negative_sampling, beam_em_mix, diversity_maximization, beam_search_em
 method: [beam_search_max]
-# TODO: use this for implementing greedy search and beam search
-decoding_method: greedy # greedy or beam_search
+decoding_method: beam_search # greedy_search or beam_search
 
 temp: 2.5 # temperature smoothing
 em_coef: 0.3
@@ -59,16 +58,16 @@ aug_method: augmix # augmix, standard
 
 ### beam search and negative sampling
 beam_width: 10
-num_negatives: 0
-
-ns_coef: 0.1
+num_positives: 5 # for beam_search_all
+num_negatives: 5
 negative_sampling_method: beam_candidate # random, beam_candidate
+ns_coef: 0.1
 
 ### diversity maximization
 dm_coef: 0.1
 
 ### uncertainty aware pseudo-labeling
-prob_threshold: 0.9
+prob_threshold: 0.3
 entropy_threshold: 0.05
 ##################################################################
 
