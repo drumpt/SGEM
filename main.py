@@ -1,3 +1,4 @@
+import time
 import random
 import os
 import gc
@@ -15,6 +16,7 @@ from torch.nn.utils.rnn import pad_sequence
 torch.backends.cudnn.enabled = False
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor, Wav2Vec2ProcessorWithLM
 from speechbrain.pretrained import EncoderDecoderASR
 from speechbrain.lobes.augment import TimeDomainSpecAugment
@@ -180,7 +182,7 @@ def eval_except_for_rnn(model):
                 m.dropout = 0
 
 
-def get_optimizer(params, opt_name='AdamW', lr=1e-4, beta=0.9, weight_decay=0., scheduler=None, step_size=1, gamma=0.7):
+def get_optimizer(args, params, opt_name='AdamW', lr=1e-4, beta=0.9, weight_decay=0., scheduler=None):
     opt = getattr(torch.optim, opt_name)
     if opt_name == 'Adam':       
         optimizer = opt(params, lr=lr, betas=(beta, 0.999), weight_decay=weight_decay)
@@ -188,7 +190,7 @@ def get_optimizer(params, opt_name='AdamW', lr=1e-4, beta=0.9, weight_decay=0., 
         optimizer = opt(params, lr=lr, weight_decay=weight_decay)
     
     if scheduler is not None: 
-        return optimizer, eval(scheduler)(optimizer, step_size=step_size, gamma=gamma)
+        return optimizer, eval(scheduler)(optimizer, T_max=args.t_max, eta_min=args.eta_min)
     return optimizer, None
 
 
@@ -381,7 +383,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             (ctc_loss / len(wavs)).backward()
     if 'beam_search_max' in args.method or 'beam_search_all' in args.method or 'beam_search_negative_sampling' in args.method:
         for i, wav in enumerate(wavs):
-            criterion = nn.CrossEntropyLoss(ignore_index=blank_index) if args.not_blank else nn.CrossEntropyLoss()
+            criterion = nn.CrossEntropyLoss(ignore_index=blank_index, label_smoothing=args.label_smoothing) if args.not_blank else nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
 
             wav = wav[:lens[i]].unsqueeze(0)
 
@@ -483,15 +485,9 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             loss = torch.sum(mean_prob * torch.log(mean_prob))
             (args.dm_coef * loss / len(wavs)).backward(retain_graph=True)
 
-    print(f"loss cal and backprop time.time() - current : {time.time() - current}")
-    current = time.time()
-
     optimizer.step()
     if scheduler is not None:
         scheduler.step()
-
-    print(f"optimize time.time() - current : {time.time() - current}")
-    current = time.time()
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
@@ -530,7 +526,7 @@ def main(args):
         params, _ = collect_params_attn(model, train_params, bias_only)
     elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
         params, _ = collect_params_trans(model, train_params, bias_only)
-    optimizer, scheduler = get_optimizer(params, opt_name=args.optimizer, lr=lr, scheduler=args.scheduler)
+    optimizer, scheduler = get_optimizer(args, params, opt_name=args.optimizer, lr=lr, scheduler=args.scheduler)
     processor = Wav2Vec2Processor.from_pretrained(args.asr, sampling_rate=sample_rate, return_attention_mask=True) if isinstance(model, Wav2Vec2ForCTC) else None
 
     global decoder_processor
