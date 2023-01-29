@@ -1,9 +1,9 @@
 ### model
-asr: facebook/wav2vec2-base-960h
+# asr: facebook/wav2vec2-base-960h
 # asr: speechbrain/asr-crdnn-rnnlm-librispeech
 # asr: speechbrain/asr-crdnn-transformerlm-librispeech
 # asr: speechbrain/asr-transformer-transformerlm-librispeech
-# asr: speechbrain/asr-conformersmall-transformerlm-librispeech
+asr: speechbrain/asr-conformersmall-transformerlm-librispeech
 # asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 # asr: pretrained_models/stt_en_conformer_transducer_large.nemo
 
@@ -32,18 +32,21 @@ log_dir: exps/test
 
 ### optimizer & train hyparameters
 optimizer: AdamW
-scheduler: null
 lr: 2e-5
-train_params: [feature] # currently supported: all, feature, LN, linear(linear probing)
+train_params: [all] # currently supported: all, feature, LN, linear(linear probing)
 steps: 10
 bias_only: false
 episodic: true # load pretrained model again for every batch
 
+### learning rate scheduler
+scheduler: null # null or CosineAnnealingLR
+t_max: 10
+eta_min: 1e-5
 ##################################################################
 ### methods & other hyperparameters
 ## currently supported methods:
 ## original, em_uncertainty, em_sparse, em_dropout, greedy_pseudo_labeling, gce, ctc, beam_search_max, beam_search_all, beam_search_negative_sampling, diversity_maximization
-method: [beam_search_max]
+method: [beam_search_max, beam_search_negative_sampling]
 decoding_method: beam_search # greedy_search or beam_search
 
 temp: 2.5 # temperature smoothing
@@ -58,17 +61,16 @@ entropy_threshold: 0.05
 
 ### beam search and negative sampling
 beam_width: 10
-num_positives: 5 # for beam_search_all
+num_positives: 1 # for beam_search_all
 num_negatives: 5
 negative_sampling_method: beam_candidate # random, beam_candidate
-ns_coef: 0.1
+ns_coef: 1
 
 ### diversity maximization
 dm_coef: 0.1
 
-### augmentation for consistency regularization
-num_augs: 1
-aug_method: augmix # augmix, standard
+### label smoothing
+label_smoothing: 0
 ##################################################################
 
 ### selective adaptation
