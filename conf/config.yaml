@@ -1,19 +1,19 @@
 ### model
-asr: facebook/wav2vec2-base-960h
+# asr: facebook/wav2vec2-base-960h
 # asr: speechbrain/asr-crdnn-rnnlm-librispeech
 # asr: speechbrain/asr-crdnn-transformerlm-librispeech
 # asr: speechbrain/asr-transformer-transformerlm-librispeech
 # asr: speechbrain/asr-conformersmall-transformerlm-librispeech
-# asr: pretrained_models/stt_en_conformer_transducer_small.nemo
+asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 # asr: pretrained_models/stt_en_conformer_transducer_large.nemo
 
 ### dataset
 # dataset_name: librispeech
 # dataset_dir: /home/server17/hdd/changhun_workspace/LibriSpeech
-# dataset_name: chime
-# dataset_dir: /home/server17/hdd/changhun_workspace/CHiME3
-dataset_name: ted
-dataset_dir: /home/server17/hdd/changhun_workspace/TEDLIUM_release2/test
+dataset_name: chime
+dataset_dir: /home/server17/hdd/changhun_workspace/CHiME3
+# dataset_name: ted
+# dataset_dir: /home/server17/hdd/changhun_workspace/TEDLIUM_release2/test
 # dataset_name: valentini
 # dataset_dir: /home/server17/hdd/changhun_workspace/Valentini
 # dataset_name: commonvoice
@@ -32,21 +32,21 @@ log_dir: exps/test
 
 ### optimizer & train hyparameters
 optimizer: AdamW
-lr: 4e-5
-train_params: [feature] # currently supported: all, feature, LN, linear(linear probing)
+lr: 2e-5
+train_params: [all] # currently supported: all, feature, LN, linear(linear probing)
 steps: 10
 bias_only: false
 episodic: true # load pretrained model again for every batch
 
 ### learning rate scheduler
-scheduler: CosineAnnealingLR # null or CosineAnnealingLR
+scheduler: null # null or CosineAnnealingLR
 t_max: 10
 eta_min: 2e-5
 ##################################################################
 ### methods & other hyperparameters
 ## currently supported methods:
 ## original, em_uncertainty, em_sparse, em_dropout, greedy_pseudo_labeling, gce, ctc, beam_search_max, beam_search_all, beam_search_negative_sampling, diversity_maximization
-method: [beam_search_max, beam_search_negative_sampling]
+method: [beam_search_max]
 decoding_method: beam_search # greedy_search or beam_search
 
 temp: 2.5 # temperature smoothing

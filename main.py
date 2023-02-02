@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
-torch.backends.cudnn.enabled = True
+torch.backends.cudnn.enabled = False
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -387,7 +387,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
 
             wav = wav[:lens[i]].unsqueeze(0)
             outputs = forward_batch(args, model, wav, torch.FloatTensor([lens[i]]).to(wav.device))
-            ctc_loss = pseudo_labeling_loss(outputs, vocab, processor)
+            ctc_loss = pl_loss(outputs, vocab, processor)
 
             (ctc_loss / len(wavs)).backward()
     if 'beam_search_max' in args.method or 'beam_search_all' in args.method or 'beam_search_negative_sampling' in args.method:
@@ -407,7 +407,13 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             if 'beam_search_negative_sampling' in args.method:
                 negative_outputs = outputs.clone()
             encoder_output, encoder_length = encode_batch(args, model, wav, torch.FloatTensor([lens[i]]).to(wav.device))
-            pseudo_labels = decode_batch(args, model, decoder_processor, encoder_output, encoder_length)
+            # pseudo_labels = decode_batch(args, model, decoder_processor, encoder_output, encoder_length)
+
+            decoder_outputs = decode_batch(args, model, decoder_processor, encoder_output, encoder_length)
+            outputs = torch.stack(decoder_outputs[0].logit_list, dim=0).unsqueeze(0)
+            pseudo_labels = [torch.stack(decoder_output.token_list, dim=0) for decoder_output in decoder_outputs]
+
+            print(f"outputs: {outputs.shape}")
 
             print(f"beam search time.time() - current : {time.time() - current}")
             current = time.time()
