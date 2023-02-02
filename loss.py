@@ -34,7 +34,7 @@ def mcc_loss(x, reweight=False, dim=-1, class_num=32):
     return mcc_loss
 
 
-def pseudo_labeling_loss(outputs, vocab, processor):
+def pl_loss(outputs, vocab, processor):
     ctc_loss = nn.CTCLoss(blank=0, zero_infinity=False)
     predicted_ids = torch.argmax(outputs, dim=-1)
     transcription = processor.batch_decode(predicted_ids)[0]
@@ -55,17 +55,3 @@ def js_divergence(p1, p2):
     total_m = 0.5 * (p1 + p2)
     loss = 0.5 * F.kl_div(torch.log(p1), total_m, reduction="batchmean") + 0.5 * F.kl_div(torch.log(p2), total_m, reduction="batchmean")
     return loss
-
-
-# def get_pl_loss(outputs, transcription, vocab):
-#     ctc_loss = nn.CTCLoss(blank=0, zero_infinity=False)
-#     target = []
-#     for s in transcription:
-#         if s == ' ':
-#             s = '|'
-#         target.append(vocab[s])
-#     logp = outputs.log_softmax(1).transpose(1, 0) # L,N,D
-#     input_len = logp.shape[0]
-#     tgt_len = len(target)
-#     loss = ctc_loss(logp, torch.tensor(target).int(), torch.tensor([input_len]), torch.tensor([tgt_len]))            
-#     return loss
