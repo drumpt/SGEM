@@ -1,9 +1,9 @@
 ### model
-# asr: facebook/wav2vec2-base-960h
+asr: facebook/wav2vec2-base-960h
 # asr: speechbrain/asr-crdnn-rnnlm-librispeech
 # asr: speechbrain/asr-crdnn-transformerlm-librispeech
 # asr: speechbrain/asr-transformer-transformerlm-librispeech
-asr: speechbrain/asr-conformersmall-transformerlm-librispeech
+# asr: speechbrain/asr-conformersmall-transformerlm-librispeech
 # asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 # asr: pretrained_models/stt_en_conformer_transducer_large.nemo
 
@@ -20,7 +20,7 @@ dataset_dir: /home/server17/hdd/changhun_workspace/CHiME3
 # dataset_dir: /home/server17/hdd/changhun_workspace/cv-corpus-5.1-2020-06-22/en
 split: [test-other]
 extra_noise: 0.00
-noise_type: null  # currently supported: null, AirConditioner_6, AirportAnnouncements_2, Babble_4, CopyMachine_2, Munching_3, Neighbor_6, ShuttingDoor_6, Typing_2, VacuumCleaner_1
+noise_type: null # currently supported: null, AirConditioner_6, AirportAnnouncements_2, Babble_4, CopyMachine_2, Munching_3, Neighbor_6, ShuttingDoor_6, Typing_2, VacuumCleaner_1
 sample_rate: 16000
 batch_size: 1
 
@@ -33,7 +33,7 @@ log_dir: exps/test
 ### optimizer & train hyparameters
 optimizer: AdamW
 lr: 2e-5
-train_params: [all] # currently supported: all, feature, LN, linear(linear probing)
+train_params: [feature] # currently supported: all, feature, LN, linear(linear probing)
 steps: 10
 bias_only: false
 episodic: true # load pretrained model again for every batch
@@ -41,7 +41,7 @@ episodic: true # load pretrained model again for every batch
 ### learning rate scheduler
 scheduler: null # null or CosineAnnealingLR
 t_max: 10
-eta_min: 1e-5
+eta_min: 5e-6
 ##################################################################
 ### methods & other hyperparameters
 ## currently supported methods:
@@ -50,7 +50,7 @@ method: [beam_search_max, beam_search_negative_sampling]
 decoding_method: beam_search # greedy_search or beam_search
 
 temp: 2.5 # temperature smoothing
-em_coef: 0.3
+em_coef: 0.3 # for balancing entropy minimization and minimum class confusion
 not_blank: true
 certain_only: true
 reweight: true
@@ -60,11 +60,11 @@ prob_threshold: 0.9
 entropy_threshold: 0.05
 
 ### beam search and negative sampling
-beam_width: 10
+beam_width: 5
 num_positives: 1 # for beam_search_all
-num_negatives: 5
+num_negatives: 4
 negative_sampling_method: beam_candidate # random, beam_candidate
-ns_coef: 1
+ns_coef: 0.1
 
 ### diversity maximization
 dm_coef: 0.1

@@ -1167,9 +1167,7 @@ def decode_trans(model, h, encoded_lengths):
         pseudo_labels = [torch.tensor(hyp.y_sequence) for hyp in model.sort_nbest(final)]
         min_length = min([len(pseudo_label) for pseudo_label in pseudo_labels])
         return [pseudo_label[:min_length] for pseudo_label in pseudo_labels]
-        # return model.sort_nbest(final)
     else:
         pseudo_labels =  [torch.tensor(hyp.y_sequence) for hyp in B]
         min_length = min([len(pseudo_label) for pseudo_label in pseudo_labels])
         return [pseudo_label[:min_length] for pseudo_label in pseudo_labels]
-        # return B
