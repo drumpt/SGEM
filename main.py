@@ -13,9 +13,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
-torch.backends.cudnn.enabled = False
+torch.backends.cudnn.enabled = True
 torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.benchmark = False
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor, Wav2Vec2ProcessorWithLM
 from speechbrain.pretrained import EncoderDecoderASR
@@ -25,10 +25,21 @@ from nemo.collections.asr.parts.submodules.rnnt_beam_decoding import BeamRNNTInf
 from audio_augmentations import *
 from jiwer import wer
 
-from data import load_dataset
+from data import load_dataset, CTC_VOCAB
 from forward import transcribe_batch, forward_batch, encode_batch, decode_batch
 from loss import *
 
+
+def set_seed(seed):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(True)
+    torch.set_num_threads(1)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
 
 
 def get_logger(args):
@@ -372,9 +383,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
     if 'ctc' in args.method:
         for i, wav in enumerate(wavs):
             # TODO: implement this!
-            import json
-            f = open('vocab.json')
-            vocab = json.load(f)
+            vocab = CTC_VOCAB
 
             wav = wav[:lens[i]].unsqueeze(0)
             outputs = forward_batch(args, model, wav, torch.FloatTensor([lens[i]]).to(wav.device))
@@ -492,6 +501,9 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(args):
+    if args.seed:
+        set_seed(args.seed)
+
     dataset_name = args.dataset_name
     dataset_dir = args.dataset_dir
     split = args.split
