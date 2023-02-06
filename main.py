@@ -5,28 +5,30 @@ import gc
 import logging
 from copy import deepcopy
 from datetime import datetime
-
 import hydra
 from omegaconf import OmegaConf
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
-torch.backends.cudnn.enabled = False
+torch.backends.cudnn.enabled = True
 torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.benchmark = True
 from torch.optim.lr_scheduler import CosineAnnealingLR
+# from apex import amp
+# from torch.cuda.amp import GradScaler
+# from torch.cuda.amp import autocast
+
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor, Wav2Vec2ProcessorWithLM
 from speechbrain.pretrained import EncoderDecoderASR
-from speechbrain.lobes.augment import TimeDomainSpecAugment
 import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.parts.submodules.rnnt_beam_decoding import BeamRNNTInfer
-from audio_augmentations import *
 from jiwer import wer
 
 from data import load_dataset, CTC_VOCAB
-from forward import transcribe_batch, forward_batch, encode_batch, decode_batch
+from forward import transcribe_batch, forward_batch, get_logits_and_pseudo_labels, encode_batch, decode_batch
 from loss import *
 
 
@@ -54,31 +56,15 @@ def get_logger(args):
     return logger
 
 
-def get_model(args, original):
-    # CTC-based models
-    if args.asr == "facebook/wav2vec2-base-960h":
+def get_model(args):
+    if args.asr in ["facebook/wav2vec2-base-960h"]: # CTC-based models
         model = Wav2Vec2ForCTC.from_pretrained(args.asr).requires_grad_(True).eval()
         if 'cuda' in args.device:
             model = model.cuda()
-
-    # attention-based models
-    elif args.asr == "speechbrain/asr-crdnn-rnnlm-librispeech":
+    elif args.asr in ["speechbrain/asr-crdnn-rnnlm-librispeech", "speechbrain/asr-crdnn-transformerlm-librispeech", "speechbrain/asr-transformer-transformerlm-librispeech", "speechbrain/asr-conformersmall-transformerlm-librispeech"]: # attention-based models
         model = EncoderDecoderASR.from_hparams(args.asr, run_opts={"device": args.device}).requires_grad_(True).eval()
-    elif args.asr == "speechbrain/asr-crdnn-transformerlm-librispeech":
-        model = EncoderDecoderASR.from_hparams(args.asr, run_opts={"device": args.device}).requires_grad_(True).eval()
-    elif args.asr == "speechbrain/asr-transformer-transformerlm-librispeech":
-        model = EncoderDecoderASR.from_hparams(args.asr, run_opts={"device": args.device}).requires_grad_(True).eval()
-    elif args.asr == "speechbrain/asr-conformersmall-transformerlm-librispeech":
-        model = EncoderDecoderASR.from_hparams(args.asr, run_opts={"device": args.device}).requires_grad_(True).eval()
-
-    # transducers
-    elif args.asr == "pretrained_models/stt_en_conformer_transducer_small.nemo":
+    elif args.asr in ["pretrained_models/stt_en_conformer_transducer_small.nemo", "pretrained_models/stt_en_conformer_transducer_large.nemo"]: # transducers
         model = nemo_asr.models.EncDecRNNTBPEModel.restore_from(args.asr).to(args.device).requires_grad_(True).eval()
-    elif args.asr == "pretrained_models/stt_en_conformer_transducer_large.nemo":
-        model = nemo_asr.models.EncDecRNNTBPEModel.restore_from(args.asr).to(args.device).requires_grad_(True).eval()
-
-    if original:
-        model = configure_model(model)
     return model
 
 
@@ -173,24 +159,19 @@ def collect_params_trans(model, train_params, bias_only=False):
     return params, names
 
 
-def configure_model(model):
-    model.requires_grad_(False)
-    return model
-
-
 def freeze_norm_stats(model):
     for _, m in model.named_modules():
         if isinstance(m, nn.BatchNorm1d):
             m.track_running_stats = False
 
 
-def eval_except_for_rnn(model):
-    model.eval()
-    if isinstance(model, EncoderDecoderASR):
+def set_rnn_to_train(model):
+    if isinstance(model, EncoderDecoderASR) or isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
         for nm, m in model.named_modules():
-            if 'rnn' in nm.lower() or 'lstm' in nm.lower():
+            if isinstance(m, torch.nn.modules.rnn.RNNBase):
                 m.train()
                 m.dropout = 0
+    return model
 
 
 def get_optimizer(args, params, opt_name='AdamW', lr=1e-4, beta=0.9, weight_decay=0., scheduler=None):
@@ -203,53 +184,6 @@ def get_optimizer(args, params, opt_name='AdamW', lr=1e-4, beta=0.9, weight_deca
     if scheduler is not None: 
         return optimizer, eval(scheduler)(optimizer, T_max=args.t_max, eta_min=args.eta_min)
     return optimizer, None
-
-
-def get_augmentation(args):
-    weak_augmentation_list = [
-        Noise(min_snr=0.01, max_snr=0.05),
-        Gain(),
-        Reverb(sample_rate=16000),
-        HighLowPass(sample_rate=16000),
-    ]
-    strong_augmentation_list = [
-        Noise(min_snr=0.1, max_snr=0.5),
-        PitchShift(n_samples=16000, sample_rate=16000, pitch_cents_min=-700, pitch_cents_max=700),
-        TimeDomainSpecAugment(
-            perturb_prob=0, drop_freq_prob=1, drop_chunk_prob=1, speeds=[95, 100, 105],
-            drop_freq_count_low=3, drop_freq_count_high=5, drop_chunk_count_low=3, drop_chunk_count_high=5,
-            drop_chunk_length_low=500, drop_chunk_length_high=1000
-        ),
-    ]
-    return weak_augmentation_list, strong_augmentation_list
-
-
-def apply_augmentation(args, augmentation_list, wavs):
-    if args.aug_method == "augmix":
-        return apply_augmix(args, augmentation_list, wavs)
-    augmentation = np.random.choice(augmentation_list)
-    if isinstance(augmentation, TimeDomainSpecAugment):
-        aug_wavs = augmentation(wavs, torch.ones(len(wavs)).to(wavs.device))
-    else:
-        aug_wavs = augmentation(wavs.cpu())
-    return aug_wavs
-
-
-def apply_augmix(args, augmentation_list, wavs, k=3, alpha=1.0):
-    wavs_augmix = torch.zeros_like(wavs).to(wavs.device)
-    w_list = torch.distributions.dirichlet.Dirichlet(torch.tensor([alpha] * k)).sample()
-    for i in range(k):
-        num_augs = torch.randint(low=1, high=4, size=(1,))[0]
-        wavs_aug = wavs.clone().cpu()
-        for _ in range(num_augs):
-            augmentation = np.random.choice(augmentation_list)
-            if isinstance(augmentation, TimeDomainSpecAugment):
-                wavs_aug = augmentation(wavs_aug, torch.ones(len(wavs)))
-            else:
-                wavs_aug = augmentation(wavs_aug.cpu())
-        wavs_augmix += w_list[i] * wavs_aug.to(wavs.device)
-    m = torch.distributions.beta.Beta(alpha, alpha).sample()
-    return m * wavs + (1 - m) * wavs_augmix
 
 
 def copy_model_and_optimizer(model, optimizer, scheduler):
@@ -266,7 +200,6 @@ def copy_model_and_optimizer(model, optimizer, scheduler):
 def load_model_and_optimizer(model, optimizer, scheduler, model_state, optimizer_state, scheduler_state):
     """Restore the model and optimizer states from copies."""
     model.load_state_dict(model_state, strict=True)
-    model.eval()
     optimizer.load_state_dict(optimizer_state)
     if scheduler is not None:
         scheduler.load_state_dict(scheduler_state)
@@ -287,7 +220,6 @@ def get_blank_index(args, model, processor):
 
 def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
     optimizer.zero_grad()
-    global decoder_processor
     blank_index = get_blank_index(args, model, decoder_processor)
 
     if "original" in args.method or "em_uncertainty" in args.method or "em_sparse" in args.method:
@@ -320,7 +252,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
                 (args.em_coef * e_loss / (len(wavs))).backward(retain_graph=True)
 
             if 1 - args.em_coef > 0:
-                c_loss = mcc_loss(outputs / args.temp, args.reweight)
+                c_loss = mcc_loss(outputs / args.temp, reweight=True)
                 ((1 - args.em_coef) * c_loss / (len(wavs))).backward(retain_graph=True)
     if "em_dropout" in args.method:
         for i, wav in enumerate(wavs):
@@ -334,6 +266,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
                 non_blank = torch.where(predicted_ids != blank_index, 1, 0).bool()
                 e_loss += (softmax_entropy(outputs / args.temp)[non_blank].mean(0).mean()) / NUM_DROPOUTS
             model.eval()
+            model = set_rnn_to_train(model)
             (args.em_coef * e_loss / (len(wavs))).backward(retain_graph=True)
     if "greedy_pseudo_labeling" in args.method:
         for i, wav in enumerate(wavs):
@@ -382,7 +315,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             del wav, log_prob_tensor, max_probs, gce_loss
     if 'ctc' in args.method:
         for i, wav in enumerate(wavs):
-            # TODO: implement this!
+            # TODO: implement this
             vocab = CTC_VOCAB
 
             wav = wav[:lens[i]].unsqueeze(0)
@@ -399,24 +332,11 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             import time
             current = time.time()
 
-            outputs = forward_batch(args, model, wav, torch.FloatTensor([lens[i]]).to(wav.device))
-
-            print(f"forward time.time() - current : {time.time() - current}")
-            current = time.time()
-
+            outputs, pseudo_labels = get_logits_and_pseudo_labels(args, model, decoder_processor, wav, torch.FloatTensor([lens[i]]).to(wav.device))
             if 'beam_search_negative_sampling' in args.method:
                 negative_outputs = outputs.clone()
-            encoder_output, encoder_length = encode_batch(args, model, wav, torch.FloatTensor([lens[i]]).to(wav.device))
-            # pseudo_labels = decode_batch(args, model, decoder_processor, encoder_output, encoder_length)
 
-            decoder_outputs = decode_batch(args, model, decoder_processor, encoder_output, encoder_length)
-            outputs = torch.stack(decoder_outputs[0].logit_list, dim=0).unsqueeze(0)
-            pseudo_labels = [torch.stack(decoder_output.token_list, dim=0) for decoder_output in decoder_outputs]
-
-            print(f"outputs: {outputs.shape}")
-
-            print(f"beam search time.time() - current : {time.time() - current}")
-            current = time.time()
+            print(f"beam search time.time() - current 2 : {time.time() - current}")
 
             if 'beam_search_max' in args.method:
                 char_history = pseudo_labels[0].to(args.device)
@@ -425,6 +345,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
                     top_idx, top_prob = -1, 0
                     for frame_idx, (output, char_idx) in enumerate(zip(outputs.squeeze(0), char_history)):
                         probs = torch.softmax(output, dim=-1)
+                        # print(f"probs[char_idx]: {probs[char_idx]}")
                         if probs[char_idx] > args.prob_threshold:
                             selected_frame.add(frame_idx)
                         if char_idx != blank_index and probs[char_idx].item() > top_prob:
@@ -432,6 +353,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
                             top_prob = probs[char_idx].item()
                     selected_frame.add(top_idx)
                     selected_frame = sorted(selected_frame)
+                    print(f"len(selected_frame): {len(selected_frame)}")
                     selected_outputs, selected_char_history = outputs.squeeze(0)[selected_frame], char_history[selected_frame]
                     loss = criterion(selected_outputs / args.temp, selected_char_history)
                 else:
@@ -535,9 +457,8 @@ def main(args):
     dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise, noise_type=noise_type)
     gt_texts, ori_transcriptions, transcriptions_1, transcriptions_3, transcriptions_5, transcriptions_10, transcriptions_20, transcriptions_40 = [], [], [], [], [], [], [], []
 
-    original_model = get_model(args, original=True)
-    model = get_model(args, original=False)
-
+    model = get_model(args)
+    original_model = get_model(args)
     if isinstance(model, Wav2Vec2ForCTC): # ctc
         params, _ = collect_params_ctc(model, train_params, bias_only)
     elif isinstance(model, EncoderDecoderASR):
@@ -545,6 +466,11 @@ def main(args):
     elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
         params, _ = collect_params_trans(model, train_params, bias_only)
     optimizer, scheduler = get_optimizer(args, params, opt_name=args.optimizer, lr=lr, scheduler=args.scheduler)
+    # if args.use_amp:
+    #     torch.set_default_dtype(torch.float16)
+    #     model, optimizer = amp.initialize(model, optimizer, opt_level='O3')
+    #     global scaler
+    #     scaler = GradScaler()
     processor = Wav2Vec2Processor.from_pretrained(args.asr, sampling_rate=sample_rate, return_attention_mask=True) if isinstance(model, Wav2Vec2ForCTC) else None
 
     global decoder_processor
@@ -596,6 +522,9 @@ def main(args):
                 wavs_to_adapt = wavs
                 lens_to_adapt = lens
 
+        # if args.use_amp:
+        #     wavs_to_adapt = wavs_to_adapt.half()
+
         gt_texts.extend(texts)
         ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
         ori_transcriptions.extend(ori_transcription)
@@ -610,7 +539,9 @@ def main(args):
             model, optimizer, scheduler = load_model_and_optimizer(model, optimizer, scheduler, original_model_state, original_optimizer_state, original_scheduler_state)
 
         for step_idx in range(1, steps + 1):
+            current = time.time()
             if adapt_or_not:
+                model = set_rnn_to_train(model)
                 forward_and_adapt(args, model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt)
 
             if step_idx in [1, 3, 5, 10, 20, 40]:

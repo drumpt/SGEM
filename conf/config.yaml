@@ -24,24 +24,30 @@ noise_type: null # currently supported: null, AirConditioner_6, AirportAnnouncem
 sample_rate: 16000
 batch_size: 1
 
-### device
+### device and amp for speed up
 device: cuda
+use_amp: false
 
 ### logging
 log_dir: exps/test
 
-### optimizer & train hyparameters
+### seed for reproductivity
+seed: null
+
+### optimizer & train hyparameters & learning rate scheduler
 optimizer: AdamW
 lr: 2e-5
 train_params: [all] # currently supported: all, feature, LN, linear(linear probing)
 steps: 10
 bias_only: false
 episodic: true # load pretrained model again for every batch
-
-### learning rate scheduler
 scheduler: null # null or CosineAnnealingLR
 t_max: 10
-eta_min: 2e-5
+eta_min: 1e-6
+
+### label smoothing
+label_smoothing: 0
+
 ##################################################################
 ### methods & other hyperparameters
 ## currently supported methods:
@@ -53,7 +59,6 @@ temp: 2.5 # temperature smoothing
 em_coef: 0.3 # for balancing entropy minimization and minimum class confusion
 not_blank: true
 certain_only: true
-reweight: true
 
 ### uncertainty aware pseudo-labeling
 prob_threshold: 0.9
@@ -63,19 +68,13 @@ entropy_threshold: 0.05
 beam_width: 5
 num_positives: 1 # for beam_search_all
 num_negatives: 4
-negative_sampling_method: beam_candidate # random, beam_candidate
+negative_sampling_method: beam_candidate # random, beam_candidate, ns3l
 ns_coef: 0.1
 
 ### diversity maximization
 dm_coef: 0.1
 
-### label smoothing
-label_smoothing: 0
-##################################################################
-
 ### selective adaptation
 selective_adaptation: false
 ood_threshold: -0.45
-
-### seed for reproductivity
-seed: null
+##################################################################
