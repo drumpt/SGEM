@@ -254,8 +254,6 @@ def get_logits_and_pseudo_labels(args, model, processor, wavs, lens):
         encoder_output, encoder_length = encode_batch(args, model, wavs, lens)
         pseudo_labels = decode_batch(args, model, processor, encoder_output, encoder_length)
         logits = forward_batch(args, model, wavs, lens, labels=pseudo_labels[0])
-    # print(f"logits.shape: {logits.shape}")
-    # print(f"pseudo_labels[0].shape: {pseudo_labels[0].shape}")
     return logits, pseudo_labels
 
 
