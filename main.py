@@ -490,6 +490,9 @@ def main(args):
         original_model_state, original_optimizer_state, original_scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
     for batch_idx, batch in enumerate(dataset):
+        if batch_idx >= 100:
+            continue
+
         lens, wavs, texts, _ = batch
 
         if isinstance(model, Wav2Vec2ForCTC):
@@ -539,7 +542,6 @@ def main(args):
             model, optimizer, scheduler = load_model_and_optimizer(model, optimizer, scheduler, original_model_state, original_optimizer_state, original_scheduler_state)
 
         for step_idx in range(1, steps + 1):
-            current = time.time()
             if adapt_or_not:
                 model = set_rnn_to_train(model)
                 forward_and_adapt(args, model, processor, optimizer, scheduler, wavs_to_adapt, lens_to_adapt)
