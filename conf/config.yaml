@@ -1,10 +1,10 @@
 ### model
 # asr: facebook/wav2vec2-base-960h
-# asr: speechbrain/asr-crdnn-rnnlm-librispeech
+asr: speechbrain/asr-crdnn-rnnlm-librispeech
 # asr: speechbrain/asr-crdnn-transformerlm-librispeech
 # asr: speechbrain/asr-transformer-transformerlm-librispeech
 # asr: speechbrain/asr-conformersmall-transformerlm-librispeech
-asr: pretrained_models/stt_en_conformer_transducer_small.nemo
+# asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 # asr: pretrained_models/stt_en_conformer_transducer_large.nemo
 
 ### dataset
@@ -36,8 +36,8 @@ seed: null
 
 ### optimizer & train hyparameters & learning rate scheduler
 optimizer: AdamW
-lr: 2e-5
-train_params: [all] # currently supported: all, feature, LN, linear(linear probing)
+lr: 1e-6
+train_params: [all] # currently supported: all, feature, LN, linear(linear probing), enc
 steps: 10
 bias_only: false
 episodic: true # load pretrained model again for every batch
@@ -52,8 +52,8 @@ label_smoothing: 0
 ### methods & other hyperparameters
 ## currently supported methods:
 ## original, em_uncertainty, em_sparse, em_dropout, greedy_pseudo_labeling, gce, ctc, beam_search_max, beam_search_all, beam_search_negative_sampling, diversity_maximization
-method: [beam_search_max]
-decoding_method: beam_search # greedy_search or beam_search
+method: [original]
+decoding_method: greedy_search # greedy_search or beam_search
 
 temp: 2.5 # temperature smoothing
 em_coef: 0.3 # for balancing entropy minimization and minimum class confusion
