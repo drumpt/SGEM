@@ -80,7 +80,6 @@ def transcribe_batch(args, model, processor, wavs, lens):
         for wav, len in zip(wavs, lens):
             wav = wav[:len].unsqueeze(0)
             len = len.unsqueeze(0)
-
             encoded_feature, encoded_len = model(input_signal=wav, input_signal_length=len)
             best_hyp_texts, _ = model.decoding.rnnt_decoder_predictions_tensor(
                 encoder_output=encoded_feature, encoded_lengths=encoded_len, return_hypotheses=False
@@ -911,6 +910,8 @@ def decode_attn(model, enc_states, wav_len, beam_width):
             timesteps=max_decode_steps,
         )
     
+    # print(f"hyps_and_scores: {hyps_and_scores}")
+
     topk_hyps, _, _, _, = model._get_top_score_prediction(hyps_and_scores, topk=beam_width)
     pseudo_labels = list(torch.unbind(topk_hyps.squeeze(0), dim=0))
     aux_label = [torch.tensor([model.blank_index for _ in range(max_decode_steps)])]
