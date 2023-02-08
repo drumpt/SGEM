@@ -1,14 +1,9 @@
 import time
-import random
 import os
 import gc
-import logging
-from copy import deepcopy
-from datetime import datetime
 import hydra
 from omegaconf import OmegaConf
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,202 +24,7 @@ from jiwer import wer
 
 from data import *
 from forward import *
-from loss import *
-
-
-def set_seed(seed):
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.use_deterministic_algorithms(True)
-    torch.set_num_threads(1)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-
-
-def get_logger(args):
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(message)s')
-
-    time_string = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    file_handler = logging.FileHandler(os.path.join(args.log_dir, f"log_{time_string}.txt"))
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-    return logger
-
-
-def get_model(args):
-    if args.asr in ["facebook/wav2vec2-base-960h"]: # CTC-based models
-        model = Wav2Vec2ForCTC.from_pretrained(args.asr).requires_grad_(True).eval()
-        if 'cuda' in args.device:
-            model = model.cuda()
-    elif args.asr in ["speechbrain/asr-crdnn-rnnlm-librispeech", "speechbrain/asr-crdnn-transformerlm-librispeech", "speechbrain/asr-transformer-transformerlm-librispeech", "speechbrain/asr-conformersmall-transformerlm-librispeech"]: # attention-based models
-        model = EncoderDecoderASR.from_hparams(args.asr, run_opts={"device": args.device}).requires_grad_(True).eval()
-    elif args.asr in ["pretrained_models/stt_en_conformer_transducer_small.nemo", "pretrained_models/stt_en_conformer_transducer_large.nemo"]: # transducers
-        model = nemo_asr.models.EncDecRNNTBPEModel.restore_from(args.asr).to(args.device).requires_grad_(True).eval()
-    return model
-
-
-def collect_params(model, train_params, bias_only):
-    if isinstance(model, Wav2Vec2ForCTC):
-        return collect_params_ctc(model, train_params, bias_only)
-    elif isinstance(model, EncoderDecoderASR):
-        return collect_params_attn(model, train_params)
-    elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
-        return collect_params_trans(model, train_params)
-
-
-def collect_params_ctc(model, train_params, bias_only):
-    """Collect the affine scale + shift parameters from batch norms.
-
-    Walk the model's modules and collect all batch normalization parameters.
-    Return the parameters and their names.
-
-    Note: other choices of parameterization are possible!
-    """
-    params = []
-    names = []
-    trainable = []
-    if bias_only:
-        trainable = ['bias']
-    else: 
-        trainable = ['weight', 'bias']
-
-    for nm, m in model.named_modules():
-        if "all" in train_params:
-            for np, p in m.named_parameters():
-                p.requires_grad = True
-                if not f"{nm}.{np}" in names:
-                    params.append(p)
-                    names.append(f"{nm}.{np}")
-        if "feature" in train_params:
-            if len(str(nm).split('.')) > 1:
-                if str(nm).split('.')[1] == 'feature_extractor' or str(nm).split('.')[1] == 'feature_projection':
-                    for np, p in m.named_parameters():
-                        p.requires_grad = True
-                        if not f"{nm}.{np}" in names:
-                            params.append(p)
-                            names.append(f"{nm}.{np}")
-        if "LN" in train_params:
-            if isinstance(m, nn.LayerNorm):
-                for np, p in m.named_parameters():
-                    if np in trainable:  
-                        p.requires_grad = True
-                        if not f"{nm}.{np}" in names:
-                            params.append(p)
-                            names.append(f"{nm}.{np}")
-    return params, names
-
-
-def collect_params_attn(model, train_params):
-    params = []
-    names = []
-    for np, p in model.named_parameters():
-        collect = False
-        if "all" in train_params:
-            collect = True
-        if 'enc' in train_params and 'enc' in str(np):
-            collect = True
-        if 'dec' in train_params and 'dec' in str(np):
-            collect = True
-        if 'linear' in train_params and 'fc' in str(np):
-            collect = True
-        if 'LN' in train_params and 'norm' in str(np):
-            collect = True
-
-        if collect:
-            p.requires_grad = True
-            params.append(p)
-            names.append(str(np))
-    return params, names
-
-
-def collect_params_trans(model, train_params):
-    params = []
-    names = []
-
-    for np, p in model.named_parameters():
-        collect = False 
-        if "all" in train_params:
-            collect = True
-        if 'enc' in train_params and 'enc' in str(np):
-            collect = True
-        if 'dec' in train_params and 'dec' in str(np):
-            collect = True
-        if 'joint' in train_params and 'joint' in str(np):
-            collect = True
-        if 'linear' in train_params and 'joint_net' in str(np):
-            collect = True
-        if 'LN' in train_params and 'norm' in str(np):
-            collect = True
-
-        if collect:
-            p.requires_grad = True
-            params.append(p)
-            names.append(str(np))
-    return params, names
-
-
-def freeze_norm_stats(model):
-    for m in model.modules():
-        if isinstance(m, nn.BatchNorm1d):
-            m.track_running_stats = False
-
-
-def set_rnn_to_train(model):
-    if isinstance(model, EncoderDecoderASR) or isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
-        for m in model.modules():
-            if isinstance(m, torch.nn.modules.rnn.RNNBase):
-                m.train()
-                m.dropout = 0
-    return model
-
-
-def get_optimizer(args, params, opt_name='AdamW', lr=1e-4, beta=0.9, weight_decay=0., scheduler=None):
-    opt = getattr(torch.optim, opt_name)
-    if opt_name == 'Adam':       
-        optimizer = opt(params, lr=lr, betas=(beta, 0.999), weight_decay=weight_decay)
-    else: 
-        optimizer = opt(params, lr=lr, weight_decay=weight_decay)
-    
-    if scheduler is not None: 
-        return optimizer, eval(scheduler)(optimizer, T_max=args.t_max, eta_min=args.eta_min)
-    return optimizer, None
-
-
-def copy_model_and_optimizer(model, optimizer, scheduler):
-    """Copy the model and optimizer states for resetting after adaptation."""
-    model_state = deepcopy(model.state_dict())
-    optimizer_state = deepcopy(optimizer.state_dict())
-    if scheduler is not None:
-        scheduler_state = deepcopy(scheduler.state_dict())
-        return model_state, optimizer_state, scheduler_state
-    else:
-        return model_state, optimizer_state, None
-
-
-def load_model_and_optimizer(model, optimizer, scheduler, model_state, optimizer_state, scheduler_state):
-    """Restore the model and optimizer states from copies."""
-    model.load_state_dict(model_state, strict=True)
-    optimizer.load_state_dict(optimizer_state)
-    if scheduler is not None:
-        scheduler.load_state_dict(scheduler_state)
-        return model, optimizer, scheduler
-    else: 
-        return model, optimizer, None
-
-
-def get_blank_index(args, model, processor):
-    if isinstance(model, Wav2Vec2ForCTC):
-        blank_index = 0
-    elif isinstance(model, EncoderDecoderASR):
-        blank_index = model.mods.decoder.blank_index
-    elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
-        blank_index = processor.blank
-    return blank_index
+from utils import *
 
 
 def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
@@ -299,7 +99,6 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
                     top_idx, top_prob = -1, 0
                     for frame_idx, (output, char_idx) in enumerate(zip(outputs.squeeze(0), char_history)):
                         probs = torch.softmax(output, dim=-1)
-                        # print(f"probs[char_idx]: {probs[char_idx]}")
                         if probs[char_idx] > args.prob_threshold:
                             selected_frame.add(frame_idx)
                         if char_idx != blank_index and probs[char_idx].item() > top_prob:
@@ -450,6 +249,8 @@ def main(args):
     for batch_idx, batch in enumerate(dataset):
         lens, wavs, texts, _ = batch
 
+        print(f"type(processor): {type(processor)}")
+
         if isinstance(model, Wav2Vec2ForCTC):
             wavs = processor(wavs, sampling_rate=16000, return_tensors="pt", padding="longest").input_values.to(args.device)
         else:
@@ -462,9 +263,9 @@ def main(args):
         ori_wer = wer(list(texts), list(ori_transcription))
 
         logger.info(f"{batch_idx}/{len(dataset)}")
-        logger.info(f"gt text: {list(texts)}")
+        logger.info(f"gt text: {' '.join(list(texts))}")
         logger.info(f"original WER: {ori_wer}")
-        logger.info(f"original text: {list(ori_transcription)}")
+        logger.info(f"original text: {' '.join(list(ori_transcription))}")
 
         if episodic:
             model, optimizer, scheduler = load_model_and_optimizer(model, optimizer, scheduler, original_model_state, original_optimizer_state, original_scheduler_state)
