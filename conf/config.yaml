@@ -1,10 +1,10 @@
 ### model
-asr: facebook/wav2vec2-base-960h
+# asr: facebook/wav2vec2-base-960h
 # asr: speechbrain/asr-crdnn-rnnlm-librispeech
 # asr: speechbrain/asr-crdnn-transformerlm-librispeech
 # asr: speechbrain/asr-transformer-transformerlm-librispeech
 # asr: speechbrain/asr-conformersmall-transformerlm-librispeech
-# asr: pretrained_models/stt_en_conformer_transducer_small.nemo
+asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 # asr: pretrained_models/stt_en_conformer_transducer_large.nemo
 
 ### dataset
@@ -37,7 +37,7 @@ seed: null
 ### optimizer & train hyparameters & learning rate scheduler
 optimizer: AdamW
 lr: 4e-5
-train_params: [feature] # currently supported: all, feature, LN, linear(linear probing), enc
+train_params: [all] # currently supported: all, feature, LN, linear(linear probing), enc
 steps: 10
 bias_only: false
 episodic: true # load pretrained model again for every batch
@@ -51,7 +51,8 @@ label_smoothing: 0
 ##################################################################
 ### methods & other hyperparameters
 ## currently supported methods:
-## original, em_uncertainty, em_sparse, em_dropout, greedy_pseudo_labeling, gce, ctc, beam_search_max, beam_search_all, beam_search_negative_sampling, diversity_maximization, renyi_em
+## original, em_uncertainty, em_sparse, greedy_pseudo_labeling, ctc, beam_search_max, beam_search_all, beam_search_negative_sampling, diversity_maximization, renyi_em
+## deleted: gce, em_dropout
 method: [renyi_em]
 decoding_method: beam_search # greedy_search or beam_search
 
