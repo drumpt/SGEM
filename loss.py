@@ -7,13 +7,25 @@ def softmax_entropy(x, dim=-1):
     return -(x.softmax(dim) * x.log_softmax(dim)).sum(dim)
 
 
+def renyi_entropy(x, alpha, dim=-1):
+    # x: (B, L, D)
+    if alpha == 1:
+        return torch.mean(softmax_entropy(x, dim))
+    if alpha == 'inf':
+        entropy, _ = torch.max(x, dim)
+        return -torch.mean(torch.log(entropy))
+    entropy = torch.log(torch.pow(x.softmax(dim), alpha).sum(dim)) # entropy: B, L
+    entropy = entropy / (1 - alpha)
+    return torch.mean(entropy)
+
+
 def non_saturating_loss(x, dim=-1):
     max_idx = torch.argmax(x, dim=dim, keepdim=True)
     one_hots = torch.zeros_like(x).scatter(dim, max_idx, 1).to(x.device)
     return - torch.mean(one_hots * x) + torch.log(((1 - one_hots) * torch.exp(x)).sum(dim=dim)).mean()
 
 
-def mcc_loss(x, reweight=False, dim=-1, class_num=32):
+def mcc_loss(x, class_num, reweight=False, dim=-1):
     mcc_loss = 0
     for x_split in x: # (B, L, D) -> (L, D)
         x_split = x_split.unsqueeze(0)
@@ -35,6 +47,9 @@ def mcc_loss(x, reweight=False, dim=-1, class_num=32):
 
 
 def pl_loss(outputs, vocab, processor):
+    # TODO: change blank index from zero to others
+    raise NotImplementedError
+
     ctc_loss = nn.CTCLoss(blank=0, zero_infinity=False)
     predicted_ids = torch.argmax(outputs, dim=-1)
     transcription = processor.batch_decode(predicted_ids)[0]

@@ -27,8 +27,8 @@ import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.parts.submodules.rnnt_beam_decoding import BeamRNNTInfer
 from jiwer import wer
 
-from data import load_dataset, CTC_VOCAB
-from forward import transcribe_batch, forward_batch, get_logits_and_pseudo_labels, encode_batch, decode_batch
+from data import *
+from forward import *
 from loss import *
 
 
@@ -225,7 +225,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
     if "original" in args.method or "em_uncertainty" in args.method or "em_sparse" in args.method:
         for i, wav in enumerate(wavs):
             wav = wav.unsqueeze(0)[:lens[i]]
-            outputs = forward_batch(args, model, wav, torch.FloatTensor([lens[i]]).to(wav.device))
+            outputs, _ = get_logits_and_pseudo_labels(args, model, decoder_processor, wav, torch.FloatTensor([lens[i]]).to(wav.device))
             predicted_ids = torch.argmax(outputs, dim=-1)
             non_blank = torch.where(predicted_ids != blank_index, 1, 0).bool()
 
@@ -252,7 +252,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
                 (args.em_coef * e_loss / (len(wavs))).backward(retain_graph=True)
 
             if 1 - args.em_coef > 0:
-                c_loss = mcc_loss(outputs / args.temp, reweight=True)
+                c_loss = mcc_loss(outputs / args.temp, class_num=outputs.shape[-1], reweight=True)
                 ((1 - args.em_coef) * c_loss / (len(wavs))).backward(retain_graph=True)
     if "em_dropout" in args.method:
         for i, wav in enumerate(wavs):
@@ -261,7 +261,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             model.train()
             NUM_DROPOUTS = 5
             for _ in range(NUM_DROPOUTS):
-                outputs = forward_batch(args, model, wav, torch.FloatTensor([lens[i]]).to(wav.device))
+                outputs, _ = get_logits_and_pseudo_labels(args, model, decoder_processor, wav, torch.FloatTensor([lens[i]]).to(wav.device))
                 predicted_ids = torch.argmax(outputs, dim=-1)
                 non_blank = torch.where(predicted_ids != blank_index, 1, 0).bool()
                 e_loss += (softmax_entropy(outputs / args.temp)[non_blank].mean(0).mean()) / NUM_DROPOUTS
@@ -295,7 +295,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
         q = 0.7
         for i, wav in enumerate(wavs):
             wav = wav.unsqueeze(0)[:lens[i]]
-            log_prob_tensor = forward_batch(args, model, wav, torch.FloatTensor([lens[i]]).to(wav.device))
+            log_prob_tensor, _ = get_logits_and_pseudo_labels(args, model, decoder_processor, wav, torch.FloatTensor([lens[i]]).to(wav.device))
             probs = torch.softmax(log_prob_tensor / args.temp, dim=-1)
             max_probs, _ = torch.max(probs, dim=-1, keepdim=False)
 
@@ -319,9 +319,9 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             vocab = CTC_VOCAB
 
             wav = wav[:lens[i]].unsqueeze(0)
-            outputs = forward_batch(args, model, wav, torch.FloatTensor([lens[i]]).to(wav.device))
+            outputs, _ = get_logits_and_pseudo_labels(args, model, decoder_processor, wav, torch.FloatTensor([lens[i]]).to(wav.device))
+            
             ctc_loss = pl_loss(outputs, vocab, processor)
-
             (ctc_loss / len(wavs)).backward()
     if 'beam_search_max' in args.method or 'beam_search_all' in args.method or 'beam_search_negative_sampling' in args.method:
         for i, wav in enumerate(wavs):
@@ -409,18 +409,33 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
                         selected_negative_char_history = negative_char_history[selected_frame]
                         if len(selected_negative_outputs) > 0:
                             negative_loss += -criterion(selected_negative_outputs / args.temp, selected_negative_char_history) / args.num_negatives
+                elif args.negative_sampling_method == 'ns3l':
+                    negative_mask = torch.where(torch.softmax(negative_outputs, dim=-1) < args.ns_threshold * (10 / negative_outputs.shape[-1]), 1, 0)
+                    negative_loss += torch.mean(-torch.log(1 - torch.sum(negative_mask * torch.softmax(negative_outputs / args.temp, dim=-1), dim=-1)))
                 if torch.is_tensor(negative_loss):
                     (args.ns_coef * negative_loss / len(wavs)).backward(retain_graph=True)
     if 'diversity_maximization' in args.method:
         for i, wav in enumerate(wavs):
             wav = wav[:lens[i]].unsqueeze(0)
-            outputs = forward_batch(args, model, wav, torch.FloatTensor([lens[i]]).to(wav.device))
+            outputs, _ = get_logits_and_pseudo_labels(args, model, decoder_processor, wav, torch.FloatTensor([lens[i]]).to(wav.device))
             predicted_ids = torch.argmax(outputs, dim=-1)
             non_blank = torch.where(predicted_ids != blank_index, 1, 0).bool()
             probs = torch.softmax(outputs[non_blank] / args.temp, dim=-1)
             mean_prob = torch.mean(probs, dim=0)
             loss = torch.sum(mean_prob * torch.log(mean_prob))
             (args.dm_coef * loss / len(wavs)).backward(retain_graph=True)
+    if 'renyi_em' in args.method:
+        for i, wav in enumerate(wavs):
+            wav = wav[:lens[i]].unsqueeze(0)
+            outputs, _ = get_logits_and_pseudo_labels(args, model, decoder_processor, wav, torch.FloatTensor([lens[i]]).to(wav.device))
+            predicted_ids = torch.argmax(outputs, dim=-1)
+            non_blank = torch.where(predicted_ids != blank_index, 1, 0).bool()
+
+            if args.not_blank:
+                e_loss = renyi_entropy((outputs / args.temp)[non_blank], alpha=args.renyi_entropy_alpha)
+            else:
+                e_loss = renyi_entropy(outputs / args.temp, alpha=args.renyi_entropy_alpha)
+            (e_loss / (len(wavs))).backward(retain_graph=True)
 
     optimizer.step()
     if scheduler is not None:
@@ -490,9 +505,6 @@ def main(args):
         original_model_state, original_optimizer_state, original_scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
     for batch_idx, batch in enumerate(dataset):
-        if batch_idx >= 100:
-            continue
-
         lens, wavs, texts, _ = batch
 
         if isinstance(model, Wav2Vec2ForCTC):
