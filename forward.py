@@ -31,6 +31,7 @@ except ImportError:
     pass
 
 
+# for ctc-based models
 Frames = Tuple[int, int]
 WordFrames = Tuple[str, Frames]
 LMBeam = Tuple[str, str, str, Optional[str], List[Frames], Frames, float, float]
@@ -43,7 +44,7 @@ EMPTY_START_BEAM = ("", "", "", None, [], NULL_FRAMES, 0.0, [])
 
 
 @dataclass
-class Hypothesis:
+class Hypothesis: # for transducers
     score: float
     y_sequence: Union[List[int], torch.Tensor]
     text: Optional[str] = None
@@ -910,8 +911,6 @@ def decode_attn(model, enc_states, wav_len, beam_width):
             timesteps=max_decode_steps,
         )
     
-    # print(f"hyps_and_scores: {hyps_and_scores}")
-
     topk_hyps, _, _, _, = model._get_top_score_prediction(hyps_and_scores, topk=beam_width)
     pseudo_labels = list(torch.unbind(topk_hyps.squeeze(0), dim=0))
     aux_label = [torch.tensor([model.blank_index for _ in range(max_decode_steps)])]
