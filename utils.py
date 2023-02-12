@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from transformers import Wav2Vec2ForCTC
 from speechbrain.pretrained import EncoderDecoderASR
@@ -27,7 +28,7 @@ def set_seed(seed):
 
 
 def get_logger(args):
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger("main")
     logger.setLevel(logging.INFO)
     formatter = logging.Formatter('%(message)s')
 
@@ -276,3 +277,18 @@ def pl_loss(outputs, vocab, processor):
     # tgt_len = len(target)
     # loss = ctc_loss(logp, torch.tensor(target).int(), torch.tensor([input_len]), torch.tensor([tgt_len]))
     # return loss
+
+
+def _log_softmax(x, axis):
+    x_max = np.amax(x, axis=axis, keepdims=True)
+    if x_max.ndim > 0:
+        x_max[~np.isfinite(x_max)] = 0
+    elif not np.isfinite(x_max):
+        x_max = 0
+    tmp = x - x_max
+    exp_tmp = np.exp(tmp)
+    with np.errstate(divide="ignore"):
+        s = np.sum(exp_tmp, axis=axis, keepdims=True)
+        out: np.ndarray = np.log(s)
+    out = tmp - out
+    return out

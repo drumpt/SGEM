@@ -3,6 +3,7 @@ import math
 from typing import Any, Dict, List, Optional, Tuple, Union
 import heapq
 from copy import deepcopy
+from collections import defaultdict
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -30,6 +31,8 @@ try:
 except ImportError:
     pass
 
+from utils import _log_softmax
+
 
 # for ctc-based models
 Frames = Tuple[int, int]
@@ -39,7 +42,6 @@ LMState = Optional[Union["kenlm.State", List["kenlm.State"]]]
 OutputBeam = Tuple[str, LMState, List[WordFrames], float, float]
 OutputBeamMPSafe = Tuple[str, List[WordFrames], float, float]
 NULL_FRAMES: Frames = (-1, -1)  # placeholder that gets replaced with positive integer frame indices
-EMPTY_START_BEAM = ("", "", "", None, [], NULL_FRAMES, 0.0, [])
 
 
 
@@ -90,20 +92,263 @@ def transcribe_batch(args, model, processor, wavs, lens):
     return transcription
 
 
-def forward_batch(args, model, wavs, lens, labels=None):
+def forward_batch(args, model, processor, wavs, lens, labels=None):
     if isinstance(model, Wav2Vec2ForCTC):
-        outputs = forward_ctc(args, model, wavs, lens, labels)
+        outputs = forward_ctc(args, model, processor, wavs, lens, labels)
     elif isinstance(model, EncoderDecoderASR):
+        model.mods.decoder.train() # TODO: need to be removed after debugging
+        model.mods.decoder.lm_weight = args.lm_coef
         outputs = forward_attn(args, model, wavs, lens, labels)
     elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
+        # TODO: implement language model
         outputs = forward_trans(args, model, wavs, lens, labels)
     return outputs
 
 
-def forward_ctc(args, model, wavs, lens, labels):
-    # TODO: implement beam-search based logits for entropy minimization
+def forward_ctc(args, model, processor, wavs, lens, labels):
+    def forward_ctc_with_labels(
+        model,
+        logits,
+        labels,
+        hotword_scorer,
+        lm_start_state,
+    ):
+        def _merge_tokens(token_1: str, token_2: str) -> str:
+            """Fast, whitespace safe merging of tokens."""
+            if len(token_2) == 0:
+                text = token_1
+            elif len(token_1) == 0:
+                text = token_2
+            else:
+                text = token_1 + " " + token_2
+            return text
+
+
+        def get_new_beams(
+            model,
+            beams,
+            idx_list,
+            frame_idx,
+            logit_col,
+        ):
+            new_beams = []
+            # bpe we can also have trailing word boundaries ▁⁇▁ so we may need to remember breaks
+            force_next_break = False
+            for idx_char in idx_list:
+                p_char = logit_col[idx_char]
+                char = model._idx2vocab[idx_char]
+                for (
+                    text,
+                    next_word,
+                    word_part,
+                    last_char,
+                    text_frames,
+                    part_frames,
+                    logit_score,
+                    idx_history,
+                    lm_logits,
+                ) in beams:
+                    if char == "" or last_char == char:
+                        if char == "":
+                            new_end_frame = part_frames[0]
+                        else:
+                            new_end_frame = frame_idx + 1
+                        new_part_frames = (
+                            part_frames if char == "" else (part_frames[0], new_end_frame)
+                        )
+                        new_beams.append(
+                            (
+                                text,
+                                next_word,
+                                word_part,
+                                char,
+                                text_frames,
+                                new_part_frames,
+                                logit_score + p_char,
+                                idx_history + [idx_char],
+                                lm_logits,
+                            )
+                        )
+                    # if bpe and leading space char
+                    elif model._is_bpe and (char[:1] == BPE_TOKEN or force_next_break):
+                        force_next_break = False
+                        # some tokens are bounded on both sides like ▁⁇▁
+                        clean_char = char
+                        if char[:1] == BPE_TOKEN:
+                            clean_char = clean_char[1:]
+                        if char[-1:] == BPE_TOKEN:
+                            clean_char = clean_char[:-1]
+                            force_next_break = True
+                        new_frame_list = (
+                            text_frames if word_part == "" else text_frames + [part_frames]
+                        )
+                        new_beams.append(
+                            (
+                                text,
+                                word_part,
+                                clean_char,
+                                char,
+                                new_frame_list,
+                                (frame_idx, frame_idx + 1),
+                                logit_score + p_char,
+                                idx_history + [idx_char],
+                                lm_logits,
+                            )
+                        )
+                    # if not bpe and space char
+                    elif not model._is_bpe and char == " ":
+                        new_frame_list = (
+                            text_frames if word_part == "" else text_frames + [part_frames]
+                        )
+                        new_beams.append(
+                            (
+                                text,
+                                word_part,
+                                "",
+                                char,
+                                new_frame_list,
+                                NULL_FRAMES,
+                                logit_score + p_char,
+                                idx_history + [idx_char],
+                                lm_logits,
+                            )
+                        )
+                    # general update of continuing token without space
+                    else:
+                        new_part_frames = (
+                            (frame_idx, frame_idx + 1)
+                            if part_frames[0] < 0
+                            else (part_frames[0], frame_idx + 1)
+                        )
+                        new_beams.append(
+                            (
+                                text,
+                                next_word,
+                                word_part + char,
+                                char,
+                                text_frames,
+                                new_part_frames,
+                                logit_score + p_char,
+                                idx_history + [idx_char],
+                                lm_logits,
+                            )
+                        )
+            return new_beams
+
+
+        def get_lm_beams(
+            model,
+            beams,
+            hotword_scorer,
+            cached_lm_scores,
+            cached_partial_token_scores,
+            is_eos,
+        ):
+            language_model = model._language_model
+            new_beams = []
+            for text, next_word, word_part, last_char, frame_list, frames, logit_score, idx_history, lm_logits in beams:
+                new_text = _merge_tokens(text, next_word)
+                if new_text not in cached_lm_scores:
+                    _, prev_raw_lm_score, start_state = cached_lm_scores[text]
+                    score, end_state = language_model.score(start_state, next_word, is_last_word=is_eos)
+                    raw_lm_score = prev_raw_lm_score + score
+                    lm_hw_score = raw_lm_score + hotword_scorer.score(new_text)
+                    cached_lm_scores[new_text] = (lm_hw_score, raw_lm_score, end_state)
+                lm_score, _, _ = cached_lm_scores[new_text]
+
+                if len(word_part) > 0:
+                    if word_part not in cached_partial_token_scores:
+                        # if prefix available in hotword trie use that, otherwise default to char trie
+                        if word_part in hotword_scorer:
+                            cached_partial_token_scores[word_part] = hotword_scorer.score_partial_token(
+                                word_part
+                            )
+                        else:
+                            cached_partial_token_scores[word_part] = language_model.score_partial_token(
+                                word_part
+                            )
+                    lm_score += cached_partial_token_scores[word_part]
+        
+                new_beams.append(
+                    (
+                        new_text,
+                        "",
+                        word_part,
+                        last_char,
+                        frame_list,
+                        frames,
+                        logit_score,
+                        logit_score + lm_score,
+                        idx_history,
+                        lm_logits,
+                    )
+                )
+                lm_score_dict["".join(map(str, idx_history[:-1]))][model._vocab2idx[last_char]] = lm_score
+            
+            new_beams_with_lm_logits = []
+            for text, next_word, word_part, last_char, frame_list, frames, logit_score, combined_score, idx_history, lm_logits in new_beams:
+                new_beams_with_lm_logits.append(
+                    (
+                        text,
+                        next_word,
+                        word_part,
+                        last_char,
+                        frame_list,
+                        frames,
+                        logit_score,
+                        combined_score,
+                        idx_history,
+                        lm_logits + [lm_score_dict["".join(map(str, idx_history[:-1]))]],
+                    )
+                )
+            return new_beams_with_lm_logits
+
+        lm_score_dict = defaultdict(lambda: np.zeros(32))
+        language_model = model._language_model
+        if lm_start_state is None and language_model is not None:
+            cached_lm_scores: Dict[str, Tuple[float, float, LMState]] = {
+                "": (0.0, 0.0, language_model.get_start_state())
+            }
+        else:
+            cached_lm_scores = {"": (0.0, 0.0, lm_start_state)}
+        cached_p_lm_scores: Dict[str, float] = {}
+        if not hasattr(model, '_vocab2idx'):
+            model._vocab2idx = {vocab: idx for idx, vocab in model._idx2vocab.items()}
+        beams = [("", "", "", None, [], NULL_FRAMES, 0.0, [], [])] # start with single beam to expand on
+
+        for frame_idx, logit_col in enumerate(logits):
+            idx_list = list(range(0, logit_col.shape[-1]))
+            new_beams = get_new_beams(
+                model,
+                beams,
+                idx_list,
+                frame_idx,
+                logit_col,
+            )
+            scored_beams = get_lm_beams(
+                model,
+                new_beams,
+                hotword_scorer,
+                cached_lm_scores,
+                cached_p_lm_scores,
+                is_eos=False,
+            )
+            beams = [scored_beams[labels[frame_idx]][:-3] + scored_beams[labels[frame_idx]][-2:]]
+        return torch.tensor(np.array(beams[0][-1])).to(args.device)
+
     logits = model(wavs).logits
-    return logits
+    if labels == None or not args.lm_coef:
+        return logits
+    else:
+        lm_logits = forward_ctc_with_labels(
+            processor.decoder,
+            np.clip(_log_softmax(logits.squeeze(0).detach().cpu().numpy(), axis=1),
+            np.log(MIN_TOKEN_CLIP_P), 0),
+            labels,
+            hotword_scorer=HotwordScorer.build_scorer(None, weight=DEFAULT_HOTWORD_WEIGHT),
+            lm_start_state=None,
+        ).unsqueeze(0)
+        return logits + args.lm_coef * lm_logits
 
 
 def forward_attn(args, model, wavs, lens, labels):
@@ -253,7 +498,7 @@ def get_logits_and_pseudo_labels(args, model, processor, wavs, lens):
     else: # beam search
         encoder_output, encoder_length = encode_batch(args, model, wavs, lens)
         pseudo_labels = decode_batch(args, model, processor, encoder_output, encoder_length)
-        logits = forward_batch(args, model, wavs, lens, labels=pseudo_labels[0])
+        logits = forward_batch(args, model, processor, wavs, lens, labels=pseudo_labels[0])
     return logits, pseudo_labels
 
 
@@ -276,20 +521,6 @@ def encode_batch(args, model, wavs, lens):
 
 @torch.no_grad()
 def decode_batch(args, model, processor, encoder_output, encoder_length):
-    def _log_softmax(x, axis):
-        x_max = np.amax(x, axis=axis, keepdims=True)
-        if x_max.ndim > 0:
-            x_max[~np.isfinite(x_max)] = 0
-        elif not np.isfinite(x_max):
-            x_max = 0
-        tmp = x - x_max
-        exp_tmp = np.exp(tmp)
-        with np.errstate(divide="ignore"):
-            s = np.sum(exp_tmp, axis=axis, keepdims=True)
-            out: np.ndarray = np.log(s)
-        out = tmp - out
-        return out
-
     beam_width = args.beam_width if args.decoding_method == "beam_search" else 1
     if isinstance(model, Wav2Vec2ForCTC):
         logits = encoder_output.squeeze(0).detach().cpu().numpy()
@@ -305,7 +536,7 @@ def decode_batch(args, model, processor, encoder_output, encoder_length):
             lm_start_state=None,
         )
     elif isinstance(model, EncoderDecoderASR):
-        model.mods.decoder.topk = beam_width 
+        model.mods.decoder.topk = beam_width
         pseudo_labels = decode_attn(
             model.mods.decoder,
             encoder_output,
@@ -577,7 +808,7 @@ def decode_ctc(
         cached_lm_scores = {"": (0.0, 0.0, lm_start_state)}
     cached_p_lm_scores: Dict[str, float] = {}
     # start with single beam to expand on
-    beams = [EMPTY_START_BEAM]
+    beams = [("", "", "", None, [], NULL_FRAMES, 0.0, [])]
 
     for frame_idx, logit_col in enumerate(logits):
         max_idx = logit_col.argmax()
@@ -955,7 +1186,7 @@ def decode_trans(model, h, encoded_lengths):
             hyps.remove(max_hyp)
 
             # update decoder state and get next score
-            y, state, _ = model.decoder.score_hypothesis(max_hyp, cache)  # [1, 1, D]
+            y, state, lm_state = model.decoder.score_hypothesis(max_hyp, cache)  # [1, 1, D]
 
             # get next token
             logit = model.joint.joint(hi, y) / model.softmax_temperature
