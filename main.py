@@ -11,7 +11,6 @@ from torch.nn.utils.rnn import pad_sequence
 torch.backends.cudnn.enabled = True
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
-from torch.optim.lr_scheduler import CosineAnnealingLR
 # from apex import amp
 # from torch.cuda.amp import GradScaler
 # from torch.cuda.amp import autocast
@@ -91,7 +90,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             ctc_loss = pl_loss(outputs, vocab, processor)
             (ctc_loss / len(wavs)).backward()
         if 'beam_search_max' in args.method or 'beam_search_all' in args.method or 'beam_search_negative_sampling' in args.method:
-            criterion = nn.CrossEntropyLoss(ignore_index=blank_index, label_smoothing=args.label_smoothing) if args.not_blank else nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
+            criterion = nn.CrossEntropyLoss(ignore_index=blank_index) if args.not_blank else nn.CrossEntropyLoss()
             if 'beam_search_max' in args.method:
                 char_history = pseudo_labels[0].to(args.device)
                 if args.certain_only:
@@ -194,41 +193,25 @@ def main(args):
     if args.seed:
         set_seed(args.seed)
 
-    dataset_name = args.dataset_name
-    dataset_dir = args.dataset_dir
-    split = args.split
-    batch_size = args.batch_size
-    extra_noise = args.extra_noise
-    noise_type = args.noise_type
-    sample_rate = args.sample_rate
-
-    optimizer = args.optimizer
-    lr = args.lr
-    scheduler = args.scheduler
-    steps = args.steps
-    train_params = args.train_params
-    bias_only = args.bias_only
-    episodic = args.episodic
-
     if not os.path.exists(args.log_dir):
         os.makedirs(args.log_dir)
     global logger
     logger = get_logger(args)
     logger.info(OmegaConf.to_yaml(args))
 
-    dataset = load_dataset(split, dataset_name, dataset_dir, batch_size, extra_noise, noise_type=noise_type)
+    dataset = load_dataset(args.split, args.dataset_name, args.dataset_dir, args.batch_size, args.extra_noise, args.noise_type)
     gt_texts, ori_transcriptions, transcriptions_1, transcriptions_3, transcriptions_5, transcriptions_10, transcriptions_20, transcriptions_40 = [], [], [], [], [], [], [], []
 
     model = get_model(args)
     original_model = get_model(args)
-    params, _ = collect_params(model, train_params, bias_only)
-    optimizer, scheduler = get_optimizer(args, params, opt_name=args.optimizer, lr=lr, scheduler=args.scheduler)
+    params, _ = collect_params(model, args.train_params, args.bias_only)
+    optimizer, scheduler = get_optimizer(args, params, opt_name=args.optimizer, lr=args.lr, scheduler=args.scheduler)
     # if args.use_amp:
     #     torch.set_default_dtype(torch.float16)
     #     model, optimizer = amp.initialize(model, optimizer, opt_level='O3')
     #     global scaler
     #     scaler = GradScaler()
-    processor = Wav2Vec2Processor.from_pretrained(args.asr, sampling_rate=sample_rate, return_attention_mask=True) if isinstance(model, Wav2Vec2ForCTC) else None
+    processor = Wav2Vec2Processor.from_pretrained(args.asr, sampling_rate=args.sample_rate, return_attention_mask=True) if isinstance(model, Wav2Vec2ForCTC) else None
 
     global decoder_processor
     if isinstance(model, Wav2Vec2ForCTC): # ctc
@@ -243,16 +226,17 @@ def main(args):
             return_best_hypothesis=False,
         )
 
+    episodic = args.episodic
+    steps = args.steps
+
     if episodic:
         original_model_state, original_optimizer_state, original_scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
     for batch_idx, batch in enumerate(dataset):
         lens, wavs, texts, _ = batch
 
-        print(f"type(processor): {type(processor)}")
-
         if isinstance(model, Wav2Vec2ForCTC):
-            wavs = processor(wavs, sampling_rate=16000, return_tensors="pt", padding="longest").input_values.to(args.device)
+            wavs = processor(wavs, sampling_rate=args.sample_rate, return_tensors="pt", padding="longest").input_values.to(args.device)
         else:
             wavs = pad_sequence([torch.from_numpy(wav) for wav in wavs], batch_first=True).to(args.device)
         lens = lens.to(args.device)
@@ -273,6 +257,7 @@ def main(args):
         for step_idx in range(1, steps + 1):
             model = set_rnn_to_train(model)
             forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens)
+            # forward_and_adapt_attn(args, model, None, processor, optimizer, scheduler, wavs, lens, adapter=None, step_idx=None)
 
             if step_idx in [1, 3, 5, 10, 20, 40]:
                 transcription = transcribe_batch(args, model, processor, wavs, lens)
@@ -291,9 +276,10 @@ def main(args):
     logger.info(f"number of data : {len(dataset)}")
     logger.info(f"original WER: {wer(gt_texts, ori_transcriptions)}")
     for step_idx in [1, 3, 5, 10, 20, 40]:
-        if step_idx <= steps:
-            transcription_list = eval(f"transcriptions_{step_idx}")
-            logger.info(f"TTA-{step_idx}: {wer(gt_texts, transcription_list)}")
+        if step_idx > steps:
+            continue
+        transcription_list = eval(f"transcriptions_{step_idx}")
+        logger.info(f"TTA-{step_idx}: {wer(gt_texts, transcription_list)}")
 
 
 
