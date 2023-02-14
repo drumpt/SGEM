@@ -173,7 +173,7 @@ def get_optimizer(args, params, opt_name='AdamW', lr=1e-4, beta=0.9, weight_deca
     else: 
         optimizer = opt(params, lr=lr, weight_decay=weight_decay)
     
-    if scheduler is not None:
+    if scheduler is not None: 
         return optimizer, eval(scheduler)(optimizer, T_max=args.t_max, eta_min=args.eta_min)
     return optimizer, None
 
