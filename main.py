@@ -257,7 +257,6 @@ def main(args):
         for step_idx in range(1, steps + 1):
             model = set_rnn_to_train(model)
             forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens)
-            # forward_and_adapt_attn(args, model, None, processor, optimizer, scheduler, wavs, lens, adapter=None, step_idx=None)
 
             if step_idx in [1, 3, 5, 10, 20, 40]:
                 transcription = transcribe_batch(args, model, processor, wavs, lens)
