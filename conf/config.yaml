@@ -1,8 +1,8 @@
 # model
 # asr: facebook/wav2vec2-base-960h
-# asr: speechbrain/asr-crdnn-rnnlm-librispeech
+asr: speechbrain/asr-crdnn-rnnlm-librispeech
 # asr: speechbrain/asr-crdnn-transformerlm-librispeech
-asr: pretrained_models/stt_en_conformer_transducer_small.nemo
+# asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 # asr: pretrained_models/stt_en_conformer_transducer_large.nemo
 
 # dataset
@@ -20,21 +20,21 @@ split: [test-other]
 extra_noise: 0.00
 noise_type: null # currently supported: null, AirConditioner_6, AirportAnnouncements_2, Babble_4, CopyMachine_2, Munching_3, Neighbor_6, ShuttingDoor_6, Typing_2, VacuumCleaner_1
 sample_rate: 16000
-batch_size: 4
+batch_size: 1
 
 # optimizer & train hyparameters
 optimizer: AdamW
 scheduler: null
-lr: 2e-5
-steps: 5
+lr: 1e-6
+steps: 10
 train_params: [all] # currently supported: all, feature, LN, linear(linear probing), da
 bias_only: false
 episodic: true # load pretrained model for every batch
 
 # methods & other hyperparameters
-method: [em_joint, original] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, p_logp, cr, cr_feature, da, contrastive_temporal
+method: [original] # currently supported: original, em_uncertainty, em_sparse, em_joint, em_aug, p_logp, cr, cr_feature, da, contrastive_temporal
 temp: 2.5 # temperature smoothing
-em_coef: 0
+em_coef: 1
 div_coef: 0
 num_augs: 2
 aug_method: augmix # augmix, standard
@@ -53,7 +53,7 @@ selective_adaptation: false
 ood_threshold: -0.45
 
 # uncertainty aware entropy minimization
-prob_threshold: 0.9
+prob_threshold: 1
 entropy_threshold: 0.05
 
 # teacher-student model for non episodic adaptation
@@ -63,6 +63,9 @@ momentum: 0.99
 # restore pretrained model for non episodic adaptation
 stochastic_restoration: false
 restore_prob: 0.01
+
+# batch size test
+batch_size_test: false
 
 # device
 device: cuda
