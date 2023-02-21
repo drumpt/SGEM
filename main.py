@@ -484,7 +484,7 @@ def forward_and_adapt_ctc(args, model, teacher_model, processor, optimizer, sche
             for sub_wav in torch.chunk(wav, chunks=args.n_neighbors + 2, dim=-1):
                 sub_wav = sub_wav.unsqueeze(0)
                 log_prob_tensor = model(sub_wav).logits
-                max_log_probs, _ = torch.max(log_prob_tensor, dim=-1, keepdim=False)
+                max_log_probs, _ = torch.max(log_prob_tensor, dim=-1, keepdim=True)
 
                 if args.certain_only:
                     probs = torch.softmax(log_prob_tensor, dim=-1)
@@ -634,7 +634,7 @@ def forward_and_adapt_attn(args, model, teacher_model, processor, optimizer, sch
                 sub_wav = sub_wav.unsqueeze(0)
                 log_probs_lst = forward_attn(args, model, greedy_searcher, sub_wav)
                 log_prob_tensor = torch.stack(log_probs_lst, dim=1)
-                max_log_probs, _ = torch.max(log_prob_tensor, dim=-1, keepdim=False)
+                max_log_probs, _ = torch.max(log_prob_tensor, dim=-1, keepdim=True)
 
                 if args.certain_only:
                     probs = torch.softmax(log_prob_tensor, dim=-1)
@@ -850,6 +850,8 @@ def forward_and_adapt_trans(args, model, teacher_model, processor, optimizer, sc
                 assert non_blank.shape == max_log_probs.shape
                 max_log_probs = non_blank * max_log_probs
 
+            print(f"torch.sum(selected_tokens * non_blank) : {torch.sum(selected_tokens * non_blank)}")
+
             sum_log_probs = torch.sum(max_log_probs, dim=-1)
             nll_loss = - sum_log_probs.mean()
             (nll_loss / len(wavs)).backward()
@@ -924,6 +926,14 @@ def main(args):
         original_model_state, original_optimizer_state, original_scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
     for batch_idx, batch in enumerate(dataset):
+        # TODO: remove(just for experiment)
+        if args.dataset_name == "commonvoice" and batch_idx * args.batch_size >= 1000:
+            break
+
+        # TODO: remove(just for experiment)
+        if args.dataset_name == "chime" and args.batch_size_test and batch_idx * args.batch_size >= 128:
+            break
+
         lens, wavs, texts, _ = batch
         if isinstance(model, Wav2Vec2ForCTC):
             wavs = processor(wavs, sampling_rate=16000, return_tensors="pt", padding="longest").input_values.to(args.device)
