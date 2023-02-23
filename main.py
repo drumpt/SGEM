@@ -86,7 +86,6 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
         if 'ctc' in args.method:
             # TODO: implement ctc loss
             vocab = CTC_VOCAB
-
             ctc_loss = pl_loss(outputs, vocab, processor)
             (ctc_loss / len(wavs)).backward()
         if 'beam_search_max' in args.method or 'beam_search_all' in args.method or 'beam_search_negative_sampling' in args.method:
