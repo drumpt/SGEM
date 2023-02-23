@@ -31,7 +31,7 @@ try:
 except ImportError:
     pass
 
-from utils import _log_softmax
+from utils import log_softmax
 
 
 # for ctc-based models
@@ -96,7 +96,7 @@ def forward_batch(args, model, processor, wavs, lens, labels=None):
     if isinstance(model, Wav2Vec2ForCTC):
         outputs = forward_ctc(args, model, processor, wavs, lens, labels)
     elif isinstance(model, EncoderDecoderASR):
-        model.mods.decoder.train() # TODO: need to be removed after debugging
+        # model.mods.decoder.train() # TODO: need to be removed after debugging
         model.mods.decoder.lm_weight = args.lm_coef
         outputs = forward_attn(args, model, wavs, lens, labels)
     elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
@@ -122,7 +122,6 @@ def forward_ctc(args, model, processor, wavs, lens, labels):
             else:
                 text = token_1 + " " + token_2
             return text
-
 
         def get_new_beams(
             model,
@@ -235,7 +234,6 @@ def forward_ctc(args, model, processor, wavs, lens, labels):
                         )
             return new_beams
 
-
         def get_lm_beams(
             model,
             beams,
@@ -255,6 +253,13 @@ def forward_ctc(args, model, processor, wavs, lens, labels):
                     lm_hw_score = raw_lm_score + hotword_scorer.score(new_text)
                     cached_lm_scores[new_text] = (lm_hw_score, raw_lm_score, end_state)
                 lm_score, _, _ = cached_lm_scores[new_text]
+
+                # if lm_score != 0:
+                #     print(f"text: {text}")
+                #     print(f"next_word: {next_word}")
+                #     print(f"new_text: {new_text}")
+                #     print(f"idx_history: {idx_history}")
+                #     print(f"lm_score: {lm_score}")
 
                 if len(word_part) > 0:
                     if word_part not in cached_partial_token_scores:
@@ -287,6 +292,11 @@ def forward_ctc(args, model, processor, wavs, lens, labels):
             
             new_beams_with_lm_logits = []
             for text, next_word, word_part, last_char, frame_list, frames, logit_score, combined_score, idx_history, lm_logits in new_beams:
+                # print(f"lm_logits: {lm_logits}")
+                # print(f"idx_history: {idx_history}")
+                # print(f"len(idx_history): {len(idx_history)}")
+                # print(f"[lm_score_dict[''.join(map(str, idx_history[:-1]))]]: {[lm_score_dict[''.join(map(str, idx_history[:-1]))]]}")
+
                 new_beams_with_lm_logits.append(
                     (
                         text,
@@ -337,12 +347,13 @@ def forward_ctc(args, model, processor, wavs, lens, labels):
         return torch.tensor(np.array(beams[0][-1])).to(args.device)
 
     logits = model(wavs).logits
+    # print(f"logits: {logits}")
     if labels == None or not args.lm_coef:
         return logits
     else:
         lm_logits = forward_ctc_with_labels(
             processor.decoder,
-            np.clip(_log_softmax(logits.squeeze(0).detach().cpu().numpy(), axis=1),
+            np.clip(log_softmax(logits.squeeze(0).detach().cpu().numpy(), axis=1),
             np.log(MIN_TOKEN_CLIP_P), 0),
             labels,
             hotword_scorer=HotwordScorer.build_scorer(None, weight=DEFAULT_HOTWORD_WEIGHT),
@@ -493,7 +504,7 @@ def forward_trans(args, model, wavs, lens, labels):
 
 def get_logits_and_pseudo_labels(args, model, processor, wavs, lens):
     if args.decoding_method == "greedy_search" or args.beam_width == 1: # greedy search
-        logits = forward_batch(args, model, wavs, lens)
+        logits = forward_batch(args, model, processor, wavs, lens)
         pseudo_labels = [torch.argmax(logits, dim=-1).squeeze(0)]
     else: # beam search
         encoder_output, encoder_length = encode_batch(args, model, wavs, lens)
@@ -524,7 +535,7 @@ def decode_batch(args, model, processor, encoder_output, encoder_length):
     beam_width = args.beam_width if args.decoding_method == "beam_search" else 1
     if isinstance(model, Wav2Vec2ForCTC):
         logits = encoder_output.squeeze(0).detach().cpu().numpy()
-        logits = np.clip(_log_softmax(logits, axis=1), np.log(MIN_TOKEN_CLIP_P), 0)
+        logits = np.clip(log_softmax(logits, axis=1), np.log(MIN_TOKEN_CLIP_P), 0)
         pseudo_labels = decode_ctc(
             processor.decoder,
             logits=logits,
@@ -589,11 +600,9 @@ def decode_ctc(
                 )
         return list(beam_dict.values())
 
-
     def _sort_and_trim_beams(beams, beam_width: int):
         """Take top N beams by score."""
         return heapq.nlargest(beam_width, beams, key=lambda x: x[-2])
-
 
     def _merge_tokens(token_1: str, token_2: str) -> str:
         """Fast, whitespace safe merging of tokens."""
@@ -604,7 +613,6 @@ def decode_ctc(
         else:
             text = token_1 + " " + token_2
         return text
-
 
     def _sum_log_scores(s1: float, s2: float) -> float:
         """Sum log odds in a numerically stable way."""
@@ -868,24 +876,30 @@ def decode_attn(model, enc_states, wav_len, beam_width):
     def inflate_tensor(tensor, times, dim):
         return torch.repeat_interleave(tensor, times, dim=dim)
 
-
     def mask_by_condition(tensor, cond, fill_value):
         tensor = torch.where(
             cond, tensor, torch.Tensor([fill_value]).to(tensor.device)
         )
         return tensor
 
-    def forward_step(self, inp_tokens, memory, enc_states, enc_lens):
+    def forward_step(model, inp_tokens, memory, enc_states, enc_lens):
         """Performs a step in the implemented beamsearcher."""
         hs, c = memory
-        e = self.emb(inp_tokens)
-        dec_out, hs, c, w = self.dec.forward_step(
+        e = model.emb(inp_tokens)
+        dec_out, hs, c, w = model.dec.forward_step(
             e, hs, c, enc_states, enc_lens
         )
-        log_probs = self.softmax(self.fc(dec_out) / self.temperature)
-        if self.dec.attn_type == "multiheadlocation":
+        log_probs = model.softmax(model.fc(dec_out) / model.temperature)
+        if model.dec.attn_type == "multiheadlocation":
             w = torch.mean(w, dim=1)
         return log_probs, (hs, c), w
+
+    def lm_forward_step(model, inp_tokens, memory):
+        """Applies a step to the LM during beamsearch."""
+        with torch.no_grad():
+            logits, hs = model.lm(inp_tokens, hx=memory)
+            log_probs = model.log_softmax(logits / model.temperature_lm)
+        return log_probs, hs
 
     enc_lens = torch.round(enc_states.shape[1] * wav_len).int()
     device = enc_states.device
@@ -992,8 +1006,8 @@ def decode_attn(model, enc_states, wav_len, beam_width):
 
         # adding LM scores to log_prob if lm_weight > 0
         if model.lm_weight > 0:
-            lm_log_probs, lm_memory = model.lm_forward_step(
-                inp_tokens, lm_memory
+            lm_log_probs, lm_memory = lm_forward_step(
+                model, inp_tokens, lm_memory,
             )
             log_probs = log_probs + model.lm_weight * lm_log_probs
         

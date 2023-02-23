@@ -105,23 +105,34 @@ def collect_params_ctc(model, train_params, bias_only):
 def collect_params_attn(model, train_params):
     params = []
     names = []
-    for np, p in model.named_parameters():
-        collect = False
-        if "all" in train_params:
-            collect = True
-        if 'enc' in train_params and 'enc' in str(np):
-            collect = True
-        if 'dec' in train_params and 'dec' in str(np):
-            collect = True
-        if 'linear' in train_params and 'fc' in str(np):
-            collect = True
-        if 'LN' in train_params and 'norm' in str(np):
-            collect = True
 
-        if collect:
-            p.requires_grad = True
-            params.append(p)
-            names.append(str(np))
+    for nm, m in model.named_modules():
+        # print(f"nm : {nm}")
+        # print(f"type(m): {type(m)}")
+        for np, p in m.named_parameters():
+            # print(f"np: {np}")
+            # print(f"type(p): {type(p)}")
+
+            collect = False
+            if "all" in train_params:
+                collect = True
+            if 'enc' in train_params and 'encoder' in str(nm):
+                collect = True
+            if 'dec' in train_params and 'decoder' in str(nm):
+                collect = True
+            # TODO: implement this
+            if 'linear' in train_params and 'fc' in str(np):
+                collect = True
+            # if 'LN' in train_params and 'norm' in str(np):
+            if 'LN' in train_params and isinstance(m, nn.LayerNorm):
+                collect = True
+
+            if collect:
+                p.requires_grad = True
+                params.append(p)
+                names.append(f"{nm}.{np}")
+    print(f"names: {names}")
+
     return params, names
 
 
@@ -259,10 +270,23 @@ def js_divergence(p1, p2):
     return loss
 
 
+def log_softmax(x, axis):
+    x_max = np.amax(x, axis=axis, keepdims=True)
+    if x_max.ndim > 0:
+        x_max[~np.isfinite(x_max)] = 0
+    elif not np.isfinite(x_max):
+        x_max = 0
+    tmp = x - x_max
+    exp_tmp = np.exp(tmp)
+    with np.errstate(divide="ignore"):
+        s = np.sum(exp_tmp, axis=axis, keepdims=True)
+        out: np.ndarray = np.log(s)
+    out = tmp - out
+    return out
+
+
 def pl_loss(outputs, vocab, processor):
     # TODO: change blank index from zero to others
-    raise NotImplementedError
-
     # ctc_loss = nn.CTCLoss(blank=0, zero_infinity=False)
     # predicted_ids = torch.argmax(outputs, dim=-1)
     # transcription = processor.batch_decode(predicted_ids)[0]
@@ -277,18 +301,4 @@ def pl_loss(outputs, vocab, processor):
     # tgt_len = len(target)
     # loss = ctc_loss(logp, torch.tensor(target).int(), torch.tensor([input_len]), torch.tensor([tgt_len]))
     # return loss
-
-
-def _log_softmax(x, axis):
-    x_max = np.amax(x, axis=axis, keepdims=True)
-    if x_max.ndim > 0:
-        x_max[~np.isfinite(x_max)] = 0
-    elif not np.isfinite(x_max):
-        x_max = 0
-    tmp = x - x_max
-    exp_tmp = np.exp(tmp)
-    with np.errstate(divide="ignore"):
-        s = np.sum(exp_tmp, axis=axis, keepdims=True)
-        out: np.ndarray = np.log(s)
-    out = tmp - out
-    return out
+    raise NotImplementedError
