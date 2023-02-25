@@ -202,6 +202,17 @@ def main(args):
     gt_texts, ori_transcriptions, transcriptions_1, transcriptions_3, transcriptions_5, transcriptions_10, transcriptions_20, transcriptions_40 = [], [], [], [], [], [], [], []
 
     model = get_model(args)
+
+    def get_n_params(model):
+        pp=0
+        for p in list(model.parameters()):
+            nn=1
+            for s in list(p.size()):
+                nn = nn*s
+            pp += nn
+        return pp
+    print(f"num_parameters: {get_n_params(model)}")
+
     original_model = get_model(args)
     params, _ = collect_params(model, args.train_params, args.bias_only)
     optimizer, scheduler = get_optimizer(args, params, opt_name=args.optimizer, lr=args.lr, scheduler=args.scheduler)
