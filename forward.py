@@ -96,8 +96,9 @@ def forward_batch(args, model, processor, wavs, lens, labels=None):
     if isinstance(model, Wav2Vec2ForCTC):
         outputs = forward_ctc(args, model, processor, wavs, lens, labels)
     elif isinstance(model, EncoderDecoderASR):
-        # model.mods.decoder.train() # TODO: need to be removed after debugging
-        model.mods.decoder.lm_weight = args.lm_coef
+        model.mods.decoder.train() # TODO: need to be removed after debugging
+        # print(f"model.mods.decoder.lm_weight: {model.mods.decoder.lm_weight}")
+        # model.mods.decoder.lm_weight = args.lm_coef
         outputs = forward_attn(args, model, wavs, lens, labels)
     elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
         # TODO: implement language model
