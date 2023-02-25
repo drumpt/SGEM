@@ -107,23 +107,20 @@ def collect_params_attn(model, train_params):
     names = []
 
     for nm, m in model.named_modules():
-        # print(f"nm : {nm}")
-        # print(f"type(m): {type(m)}")
         for np, p in m.named_parameters():
-            # print(f"np: {np}")
-            # print(f"type(p): {type(p)}")
-
             collect = False
             if "all" in train_params:
                 collect = True
             if 'enc' in train_params and 'encoder' in str(nm):
                 collect = True
             if 'dec' in train_params and 'decoder' in str(nm):
+                if 'emb' in f"{nm}.{np}":
+                    print(f"str(np): {str(np)}")
+                    continue
                 collect = True
             # TODO: implement this
             if 'linear' in train_params and 'fc' in str(np):
                 collect = True
-            # if 'LN' in train_params and 'norm' in str(np):
             if 'LN' in train_params and isinstance(m, nn.LayerNorm):
                 collect = True
 
@@ -131,8 +128,8 @@ def collect_params_attn(model, train_params):
                 p.requires_grad = True
                 params.append(p)
                 names.append(f"{nm}.{np}")
-    print(f"names: {names}")
 
+    print(f"names: {names}")
     return params, names
 
 
@@ -174,6 +171,7 @@ def set_rnn_to_train(model):
             if isinstance(m, torch.nn.modules.rnn.RNNBase):
                 m.train()
                 m.dropout = 0
+                # m.dropout = 0.001
     return model
 
 
