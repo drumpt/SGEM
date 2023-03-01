@@ -25,7 +25,7 @@ device: cuda
 use_amp: true
 
 ### logging
-log_dir: exps/test
+log_dir: exps/suta_ctc
 
 ### seed for reproductivity
 seed: null
@@ -36,16 +36,16 @@ train_params: [feature] # currently supported: all, feature, LN, linear(linear p
 steps: 10
 episodic: true # load pretrained model again for every batch
 
-lr: 4e-5
-scheduler: CosineAnnealingLR # null or CosineAnnealingLR
+lr: 2e-5
+scheduler: null # null or CosineAnnealingLR
 t_max: 10
 lr_min: 2e-5
 
 ##################################################################
 ### methods & other hyperparameters
 ## currently supported methods: original, em_uncertainty, em_sparse, greedy_pseudo_labeling, ctc, beam_search_max, beam_search_all, beam_search_negative_sampling, diversity_maximization, renyi_em
-method: [renyi_em, beam_search_negative_sampling]
-decoding_method: beam_search # greedy_search or beam_search
+method: [original]
+decoding_method: greedy_search # greedy_search or beam_search
 lm_coef: 0.3
 
 ### beam search

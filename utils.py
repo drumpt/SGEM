@@ -9,9 +9,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from apex import amp
-from torch.cuda.amp import GradScaler
-from torch.cuda.amp import autocast
 
 from transformers import Wav2Vec2ForCTC
 from speechbrain.pretrained import EncoderDecoderASR
@@ -23,8 +20,6 @@ def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.use_deterministic_algorithms(True)
-    torch.set_num_threads(1)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)

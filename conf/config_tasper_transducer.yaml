@@ -1,7 +1,7 @@
 ### model
-asr: facebook/wav2vec2-base-960h
+# asr: facebook/wav2vec2-base-960h
 # asr: pretrained_models/stt_en_conformer_ctc_small_ls.nemo
-# asr: pretrained_models/stt_en_conformer_transducer_small.nemo
+asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 
 ### dataset
 # dataset_name: librispeech
@@ -25,14 +25,14 @@ device: cuda
 use_amp: true
 
 ### logging
-log_dir: exps/test
+log_dir: exps/tasper_transducer
 
 ### seed for reproductivity
 seed: null
 
 ### optimizer & train hyparameters & learning rate scheduler
 optimizer: AdamW
-train_params: [feature] # currently supported: all, feature, LN, linear(linear probing), enc, dec
+train_params: [all] # currently supported: all, feature, LN, linear(linear probing), enc, dec
 steps: 10
 episodic: true # load pretrained model again for every batch
 
@@ -49,9 +49,9 @@ decoding_method: beam_search # greedy_search or beam_search
 lm_coef: 0.3
 
 ### beam search
-beam_width: 5
+beam_width: 3
 num_positives: 1 # for beam_search_all
-num_negatives: 4 # for beam_candidate for negtive_sampling
+num_negatives: 2 # for beam_candidate for negtive_sampling
 
 temp: 2.5 # temperature scaling
 em_coef: 0.3 # for balancing entropy minimization and minimum class confusion for baseline
