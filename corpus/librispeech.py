@@ -19,7 +19,7 @@ def read_text(file):
 
 
 class LibriDataset(Dataset):
-    def __init__(self, split, bucket_size, path, noise_type=None, ascending=False):
+    def __init__(self, bucket_size, path, noise_type=None, ascending=False):
         # Setup
         self.path = path
         self.bucket_size = bucket_size
