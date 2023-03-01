@@ -3,10 +3,15 @@ import math
 from typing import Any, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, field
 import heapq
+import copy
 
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
+from torch.cuda import amp
+# from apex import amp
+# from torch.cuda.amp import GradScaler
+# from torch.cuda.amp import autocast
 
 from transformers import Wav2Vec2ForCTC
 from speechbrain.pretrained import EncoderDecoderASR
@@ -268,7 +273,7 @@ def forward_ctc_or_conformer_with_labels(
         cached_partial_token_scores,
         is_eos,
     ):
-        lm_score_list = np.zeros(32) if isinstance(model, Wav2Vec2ForCTC) else np.zeros(129)
+        lm_score_list = np.zeros(len(beams))
         language_model = model._language_model
         new_beams = []
         for text, next_word, word_part, last_char, frame_list, frames, logit_score, idx_history, lm_logits in beams:
@@ -509,23 +514,9 @@ def get_logits_and_pseudo_labels(args, model, processor, wavs, lens):
         logits = forward_batch(args, model, processor, wavs, lens)
         pseudo_labels = [torch.argmax(logits, dim=-1).squeeze(0)]
     else: # beam search
-        current = time.time()
-
         encoder_output, encoder_length = encode_batch(args, model, wavs, lens)
-
-        print(f"encode time: {time.time() - current}")
-        current = time.time()
-
         pseudo_labels = decode_batch(args, model, processor, encoder_output, encoder_length)
-
-        print(f"decode time: {time.time() - current}")
-        current = time.time()
-
         logits = forward_batch(args, model, processor, wavs, lens, labels=pseudo_labels[0])
-
-        print(f"forward time: {time.time() - current}")
-        current = time.time()
-
     return logits, pseudo_labels
 
 
@@ -590,7 +581,6 @@ def decode_batch(args, model, processor, encoder_output, encoder_length):
         )
     elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
         processor.beam_size = beam_width
-
         pseudo_labels = decode_trans(processor, encoder_output, encoder_length)
     return pseudo_labels
 
@@ -943,27 +933,6 @@ def decode_attn(model, enc_states, wav_len, beam_width):
         log_probs = model.softmax(logits)
         return log_probs
 
-    # def _update_mem(inp_tokens, memory):
-    #     if memory is None:
-    #         return inp_tokens.unsqueeze(1)
-    #     return torch.cat([memory, inp_tokens.unsqueeze(1)], dim=-1)
-
-    # def forward_step(model, inp_tokens, memory, enc_states, enc_lens):
-    #     """Performs a step in the implemented beamsearcher."""
-    #     memory = _update_mem(inp_tokens, memory)
-    #     pred, attn = model.model.decode(memory, enc_states)
-    #     prob_dist = model.softmax(model.fc(pred) / model.temperature)
-    #     return prob_dist[:, -1, :], memory, attn
-
-    # def lm_forward_step(model, inp_tokens, memory):
-    #     """Performs a step in the implemented LM module."""
-    #     memory = _update_mem(inp_tokens, memory)
-    #     if not next(model.lm_modules.parameters()).is_cuda:
-    #         model.lm_modules.to(inp_tokens.device)
-    #     logits = model.lm_modules(memory)
-    #     log_probs = model.softmax(logits / model.temperature_lm)
-    #     return log_probs[:, -1, :], memory
-
     enc_lens = torch.round(enc_states.shape[1] * wav_len).int()
     device = enc_states.device
     batch_size = enc_states.shape[0]
@@ -1250,9 +1219,6 @@ def decode_trans(model, h, encoded_lengths):
     kept_hyps = [Hypothesis(score=0.0, y_sequence=[model.blank], dec_state=dec_state, timestep=[-1], length=0, token_list=[])]
     cache = {}
 
-    cnt = 0
-    token_min_logp = -5 # need to tune
-
     for i in range(int(encoded_lengths)):
         hi = h[:, i : i + 1, :]  # [1, 1, D]
         hyps = kept_hyps
@@ -1273,11 +1239,6 @@ def decode_trans(model, h, encoded_lengths):
             # remove blank token before top k
             top_k = ytu[ids].topk(beam_k, dim=-1)
 
-            if torch.max(top_k[0]) < token_min_logp:
-                top_k = (torch.masked_select(top_k[0], top_k[0] == torch.max(top_k[0])), torch.masked_select(top_k[1], top_k[0] == torch.max(top_k[0])))
-            else:
-                top_k = (torch.masked_select(top_k[0], top_k[0].ge(token_min_logp)), torch.masked_select(top_k[1], top_k[0].ge(token_min_logp)))
-
             # Two possible steps - blank token or non-blank token predicted
             ytu = (
                 torch.cat((top_k[0], ytu[model.blank].unsqueeze(0))),
@@ -1286,8 +1247,6 @@ def decode_trans(model, h, encoded_lengths):
 
             # for each possible step
             for logp, k in zip(*ytu):
-                cnt += 1
-
                 # construct hypothesis for step
                 new_hyp = Hypothesis(
                     score=(max_hyp.score + float(logp)),
