@@ -1,4 +1,4 @@
-# Listen, Adapt, Better WER: Source-free Single-utterance Test-time Adaptation for Automatic Speech Recognition 
+# Listen, Adapt, Better WER: Source-free Single-utterance Test-time Adaptation for Automatic Speech Recognition
 ![](https://i.imgur.com/pPAS730.png)
 ### Introduction
 Given a CTC-based trained ASR model, we proposed **Single-Utterance Test-time Adaptation (SUTA)** framework, which can adapt the source ASR model for one utterance by unsupervised objectives (such as entropy minimization, minimum class confusion). For details of SUTA's method and experimental results, please see our paper [[link]](https://arxiv.org/abs/2203.14222).

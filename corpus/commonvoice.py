@@ -23,12 +23,11 @@ def preprocess_text(text):
     return text
 
 class CVDataset(Dataset):
-    def __init__(self, split, bucket_size, path="/home/daniel094144/data/cv-corpus-5.1-2020-06-22/en", enhance=False, ascending=False):
+    def __init__(self, bucket_size, path="/home/daniel094144/data/cv-corpus-5.1-2020-06-22/en", enhance=False, ascending=False):
         # Setup
         self.path = path
         self.bucket_size = bucket_size
         
-        split = ['']
         apath = path + "/clips"
         tpath = path + "/test.tsv"
 
