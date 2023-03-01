@@ -1,11 +1,7 @@
 ### model
 # asr: facebook/wav2vec2-base-960h
-asr: speechbrain/asr-crdnn-rnnlm-librispeech
-# asr: speechbrain/asr-crdnn-transformerlm-librispeech
-# asr: speechbrain/asr-transformer-transformerlm-librispeech
-# asr: speechbrain/asr-conformersmall-transformerlm-librispeech
-# asr: pretrained_models/stt_en_conformer_transducer_small.nemo
-# asr: pretrained_models/stt_en_conformer_transducer_large.nemo
+# asr: pretrained_models/stt_en_conformer_ctc_small_ls.nemo
+asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 
 ### dataset
 # dataset_name: librispeech
@@ -19,13 +15,12 @@ dataset_dir: /home/server17/hdd/changhun_workspace/CHiME3
 # dataset_name: commonvoice
 # dataset_dir: /home/server17/hdd/changhun_workspace/cv-corpus-5.1-2020-06-22/en
 
-split: [test-other] # for librispeech
 extra_noise: 0.00
 noise_type: null # currently supported: null, AirConditioner_6, AirportAnnouncements_2, Babble_4, CopyMachine_2, Munching_3, Neighbor_6, ShuttingDoor_6, Typing_2, VacuumCleaner_1
 sample_rate: 16000
 batch_size: 1
 
-### device and amp for speed up
+### device and amp
 device: cuda
 use_amp: false
 
@@ -37,15 +32,15 @@ seed: null
 
 ### optimizer & train hyparameters & learning rate scheduler
 optimizer: AdamW
-lr: 2e-6
-train_params: [dec] # currently supported: all, feature, LN, linear(linear probing), enc, dec
+train_params: [all] # currently supported: all, feature, LN, linear(linear probing), enc, dec
 steps: 10
-bias_only: false
 episodic: true # load pretrained model again for every batch
 
+lr: 4e-5
 scheduler: CosineAnnealingLR # null or CosineAnnealingLR
 t_max: 10
-eta_min: 1e-6
+lr_min: 2e-5
+
 ##################################################################
 ### methods & other hyperparameters
 ## currently supported methods: original, em_uncertainty, em_sparse, greedy_pseudo_labeling, ctc, beam_search_max, beam_search_all, beam_search_negative_sampling, diversity_maximization, renyi_em
@@ -56,7 +51,7 @@ lm_coef: 0.3
 ### beam search
 beam_width: 5
 num_positives: 1 # for beam_search_all
-num_negatives: 4 # for beam_candidate
+num_negatives: 4 # for beam_candidate for negtive_sampling
 
 temp: 2.5 # temperature scaling
 em_coef: 1 # for balancing entropy minimization and minimum class confusion
