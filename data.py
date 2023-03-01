@@ -5,6 +5,7 @@ from functools import partial
 from torch.utils.data import DataLoader
 
 SAMPLE_RATE = 16000
+CTC_VOCAB = {"<pad>": 0, "<s>": 1, "</s>": 2, "<unk>": 3, "|": 4, "E": 5, "T": 6, "A": 7, "O": 8, "N": 9, "I": 10, "H": 11, "S": 12, "R": 13, "D": 14, "L": 15, "U": 16, "M": 17, "W": 18, "C": 19, "F": 20, "G": 21, "Y": 22, "P": 23, "B": 24, "V": 25, "K": 26, "'": 27, "X": 28, "J": 29, "Q": 30, "Z": 31}
 
 
 def collect_audio_batch(batch, extra_noise=0., maxLen=600000):
@@ -37,18 +38,10 @@ def collect_audio_batch(batch, extra_noise=0., maxLen=600000):
             audio_len.append(len(feat))
             text.append(b[1])
 
-    # # Descending audio length within each batch
-    # audio_len, file, audio_feat, text = zip(*[(feat_len, f_name, feat, txt)
-    #                                           for feat_len, f_name, feat, txt in sorted(zip(audio_len, file, audio_feat, text), reverse=True, key=lambda x:x[0])])
-
-    audio_len, file, audio_feat, text = zip(*[(feat_len, f_name, feat, txt)
-                                              for feat_len, f_name, feat, txt in zip(audio_len, file, audio_feat, text)])
-
-    # return torch.tensor(audio_len), torch.stack(audio_feat), text, file
     return torch.tensor(audio_len), audio_feat, text, file
 
 
-def create_dataset(split, name, path, batch_size=1, noise_type=None):
+def create_dataset(name, path, batch_size=1, noise_type=None):
     ''' Interface for creating all kinds of dataset'''
 
     # Recognize corpus
@@ -68,23 +61,23 @@ def create_dataset(split, name, path, batch_size=1, noise_type=None):
 
     loader_bs = batch_size
     if name.lower() == "librispeech":
-        dataset = Dataset(split, batch_size, path, noise_type=noise_type)
+        dataset = Dataset(batch_size, path, noise_type=noise_type)
     else:
-        dataset = Dataset(split, batch_size, path)
+        dataset = Dataset(batch_size, path)
 
     print(f'[INFO]    There are {len(dataset)} samples.')
 
     return dataset, loader_bs
 
 
-def load_dataset(split=None, name='librispeech', path=None, batch_size=1, extra_noise=0., noise_type=None, num_workers=4):
+def load_dataset(name='librispeech', path=None, batch_size=1, extra_noise=0., noise_type=None, num_workers=4):
     ''' Prepare dataloader for training/validation'''
-    dataset, loader_bs = create_dataset(split, name, path, batch_size, noise_type=noise_type)
-    if name == "librispeech" and noise_type == None:
+    dataset, loader_bs = create_dataset(name, path, batch_size, noise_type=noise_type)
+    if name=="librispeech":
         collate_fn = partial(collect_audio_batch, extra_noise=extra_noise)
     else:
         collate_fn = partial(collect_audio_batch, extra_noise=0)
 
     dataloader = DataLoader(dataset, batch_size=loader_bs, shuffle=False,
-                            collate_fn=collate_fn, num_workers=1)
+                            collate_fn=collate_fn, num_workers=num_workers)
     return dataloader

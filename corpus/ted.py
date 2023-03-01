@@ -20,7 +20,7 @@ def read_text(tpath, file):
 
 
 class TedDataset(Dataset):
-    def __init__(self, split, bucket_size, path="/home/daniel094144/data/TEDLIUM_release2/test", enhance=False, ascending=True):
+    def __init__(self, bucket_size, path="/home/daniel094144/data/TEDLIUM_release2/test", enhance=False, ascending=True):
         # Setup
         self.path = path
         self.bucket_size = bucket_size

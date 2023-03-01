@@ -1,351 +1,1283 @@
-import os
-import copy
-import random
-import gc
-import logging
-import pickle
-from datetime import datetime
-from copy import deepcopy
 import time
-from collections import deque
+import math
+from typing import Any, Dict, List, Optional, Tuple, Union
+from dataclasses import dataclass, field
+import heapq
+import copy
 
 import numpy as np
-from sklearn.decomposition import PCA
 import torch
-torch.backends.cudnn.enabled = False
-torch.backends.cudnn.deterministic = True
-from torch import nn
-import torch.nn.functional as F
-import torchaudio
 from torch.nn.utils.rnn import pad_sequence
-from info_nce import InfoNCE
+from torch.cuda import amp
+# from apex import amp
+# from torch.cuda.amp import GradScaler
+# from torch.cuda.amp import autocast
 
-from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+from transformers import Wav2Vec2ForCTC
 from speechbrain.pretrained import EncoderDecoderASR
-from speechbrain.lobes.augment import TimeDomainSpecAugment
-from speechbrain.decoders.seq2seq import S2SRNNGreedySearcher
-import speechbrain
-
+from speechbrain.decoders.ctc import CTCPrefixScorer
 import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.parts.utils import rnnt_utils
-from nemo.collections.asr.losses.ctc import CTCLoss
 from nemo.collections.common.parts.rnn import label_collate
-from audio_augmentations import *
-import sentencepiece
+from pyctcdecode.alphabet import BPE_TOKEN
+from pyctcdecode.constants import DEFAULT_HOTWORD_WEIGHT, DEFAULT_MIN_TOKEN_LOGP, DEFAULT_PRUNE_BEAMS, DEFAULT_PRUNE_LOGP, MIN_TOKEN_CLIP_P
+from pyctcdecode.language_model import HotwordScorer
+import kenlm
 
-from jiwer import wer
-import hydra
-from omegaconf import OmegaConf, open_dict
-
-from data import load_dataset
+from utils import log_softmax
 
 
-def forward_attn(args, model, greedy_searcher, wavs, gt_wavs=None):
-    log_probs_lst = []
+# for ctc-based models and conformers
+Frames = Tuple[int, int]
+WordFrames = Tuple[str, Frames]
+LMBeam = Tuple[str, str, str, Optional[str], List[Frames], Frames, float, float]
+LMState = Optional[Union["kenlm.State", List["kenlm.State"]]]
+OutputBeam = Tuple[str, LMState, List[WordFrames], float, float]
+OutputBeamMPSafe = Tuple[str, List[WordFrames], float, float]
+NULL_FRAMES: Frames = (-1, -1)  # placeholder that gets replaced with positive integer frame indices
 
-    enc_states = model.encode_batch(wavs, wav_lens=torch.ones(len(wavs)).to(args.device))
+
+
+@dataclass
+class Hypothesis: # for transducers
+    score: float
+    y_sequence: Union[List[int], torch.Tensor]
+    text: Optional[str] = None
+    dec_out: Optional[List[torch.Tensor]] = None
+    dec_state: Optional[Union[List[List[torch.Tensor]], List[torch.Tensor]]] = None
+    timestep: Union[List[int], torch.Tensor] = field(default_factory=list)
+    alignments: Optional[Union[List[int], List[List[int]]]] = None
+    length: Union[int, torch.Tensor] = 0
+    y: List[torch.tensor] = None
+    lm_state: Optional[Union[Dict[str, Any], List[Any]]] = None
+    lm_scores: Optional[torch.Tensor] = None
+    tokens: Optional[Union[List[int], torch.Tensor]] = None
+    last_token: Optional[torch.Tensor] = None
+    token_list: List = field(default_factory=list)
+    # logit_list: List[torch.Tensor] = field(default_factory=list)
+
+
+@torch.no_grad()
+def transcribe_batch(args, model, processor, wavs, lens):
+    transcription = []
+    if isinstance(model, Wav2Vec2ForCTC):
+        for wav, len in zip(wavs, lens):
+            wav = wav[:len].unsqueeze(0)
+            outputs = model(wav).logits
+            predicted_ids = torch.argmax(outputs, dim=-1)
+            text = processor.batch_decode(predicted_ids)
+            transcription.append(text[0])
+    elif isinstance(model, EncoderDecoderASR):
+        for wav, len in zip(wavs, lens):
+            wav = wav[:len].unsqueeze(0)
+            text = model.transcribe_batch(wav, wav_lens=torch.ones(1).to(args.device))[0]
+            transcription.append(text[0])
+    elif isinstance(model, nemo_asr.models.EncDecCTCModelBPE):
+        for wav, len in zip(wavs, lens):
+            wav = wav[:len].unsqueeze(0)
+            len = len.unsqueeze(0)
+            processed_signal, processed_signal_length = model.preprocessor(
+                input_signal=wav.to(args.device), length=len.to(args.device),
+            )
+            encoder_output, encoder_length = model.encoder(audio_signal=processed_signal, length=processed_signal_length)
+            log_probs = model.decoder(encoder_output=encoder_output)
+            greedy_predictions = log_probs.argmax(dim=-1, keepdim=False)
+            text = model._wer.ctc_decoder_predictions_tensor(greedy_predictions, predictions_len=encoder_length, return_hypotheses=False)[0].upper()
+            transcription.append(text)
+    elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
+        for wav, len in zip(wavs, lens):
+            wav = wav[:len].unsqueeze(0)
+            len = len.unsqueeze(0)
+            encoded_feature, encoded_len = model(input_signal=wav, input_signal_length=len)
+            best_hyp_texts, _ = model.decoding.rnnt_decoder_predictions_tensor(
+                encoder_output=encoded_feature, encoded_lengths=encoded_len, return_hypotheses=False
+            )
+            text = [best_hyp_text.upper() for best_hyp_text in best_hyp_texts][0]
+            transcription.append(text)
+    return transcription
+
+
+def forward_batch(args, model, processor, wavs, lens, labels=None):
+    if isinstance(model, Wav2Vec2ForCTC):
+        outputs = forward_ctc_or_conformer(args, model, processor, wavs, lens, labels)
+    elif isinstance(model, EncoderDecoderASR):
+        # TODO: need to be changed after debugging (annotations should be reversed)
+        model.mods.decoder.dec.train()
+        # model.mods.decoder.lm_weight = args.lm_coef
+        outputs = forward_attn(args, model, wavs, lens, labels)
+    elif isinstance(model, nemo_asr.models.EncDecCTCModelBPE):
+        outputs = forward_ctc_or_conformer(args, model, processor, wavs, lens, labels)
+    elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
+        outputs = forward_trans(args, model, wavs, lens, labels)
+    return outputs
+
+
+def forward_ctc_or_conformer(args, model, processor, wavs, lens, labels):
+    if isinstance(model, Wav2Vec2ForCTC):
+        logits = model(wavs).logits
+    elif isinstance(model, nemo_asr.models.EncDecCTCModelBPE):
+        processed_signal, processed_signal_length = model.preprocessor(
+            input_signal=wavs.to(args.device), length=lens.to(args.device),
+        )
+        encoder_output, _ = model.encoder(audio_signal=processed_signal, length=processed_signal_length)
+        logits = model.decoder(encoder_output=encoder_output)
+    if labels == None or not args.lm_coef:
+        return logits
+    else:
+        lm_logits = forward_ctc_or_conformer_with_labels(
+            args,
+            processor.decoder if isinstance(model, Wav2Vec2ForCTC) else processor,
+            np.clip(log_softmax(logits.squeeze(0).detach().cpu().numpy(), axis=1),
+            np.log(MIN_TOKEN_CLIP_P), 0),
+            labels,
+            hotword_scorer=HotwordScorer.build_scorer(None, weight=DEFAULT_HOTWORD_WEIGHT),
+            lm_start_state=None,
+        ).unsqueeze(0)
+        return logits + args.lm_coef * lm_logits
+
+
+def forward_ctc_or_conformer_with_labels(
+    args,
+    model,
+    logits,
+    labels,
+    hotword_scorer,
+    lm_start_state,
+):
+    def _merge_tokens(token_1: str, token_2: str) -> str:
+        """Fast, whitespace safe merging of tokens."""
+        if len(token_2) == 0:
+            text = token_1
+        elif len(token_1) == 0:
+            text = token_2
+        else:
+            text = token_1 + " " + token_2
+        return text
+
+    def get_new_beams(
+        model,
+        beams,
+        idx_list,
+        frame_idx,
+        logit_col,
+    ):
+        new_beams = []
+        # bpe we can also have trailing word boundaries ▁⁇▁ so we may need to remember breaks
+        force_next_break = False
+        for idx_char in idx_list:
+            p_char = logit_col[idx_char]
+            char = model._idx2vocab[idx_char]
+            for (
+                text,
+                next_word,
+                word_part,
+                last_char,
+                text_frames,
+                part_frames,
+                logit_score,
+                idx_history,
+                lm_logits,
+            ) in beams:
+                if char == "" or last_char == char:
+                    if char == "":
+                        new_end_frame = part_frames[0]
+                    else:
+                        new_end_frame = frame_idx + 1
+                    new_part_frames = (
+                        part_frames if char == "" else (part_frames[0], new_end_frame)
+                    )
+                    new_beams.append(
+                        (
+                            text,
+                            next_word,
+                            word_part,
+                            char,
+                            text_frames,
+                            new_part_frames,
+                            logit_score + p_char,
+                            idx_history + [idx_char],
+                            lm_logits,
+                        )
+                    )
+                # if bpe and leading space char
+                elif model._is_bpe and (char[:1] == BPE_TOKEN or force_next_break):
+                    force_next_break = False
+                    # some tokens are bounded on both sides like ▁⁇▁
+                    clean_char = char
+                    if char[:1] == BPE_TOKEN:
+                        clean_char = clean_char[1:]
+                    if char[-1:] == BPE_TOKEN:
+                        clean_char = clean_char[:-1]
+                        force_next_break = True
+                    new_frame_list = (
+                        text_frames if word_part == "" else text_frames + [part_frames]
+                    )
+                    new_beams.append(
+                        (
+                            text,
+                            word_part,
+                            clean_char,
+                            char,
+                            new_frame_list,
+                            (frame_idx, frame_idx + 1),
+                            logit_score + p_char,
+                            idx_history + [idx_char],
+                            lm_logits,
+                        )
+                    )
+                # if not bpe and space char
+                elif not model._is_bpe and char == " ":
+                    new_frame_list = (
+                        text_frames if word_part == "" else text_frames + [part_frames]
+                    )
+                    new_beams.append(
+                        (
+                            text,
+                            word_part,
+                            "",
+                            char,
+                            new_frame_list,
+                            NULL_FRAMES,
+                            logit_score + p_char,
+                            idx_history + [idx_char],
+                            lm_logits,
+                        )
+                    )
+                # general update of continuing token without space
+                else:
+                    new_part_frames = (
+                        (frame_idx, frame_idx + 1)
+                        if part_frames[0] < 0
+                        else (part_frames[0], frame_idx + 1)
+                    )
+                    new_beams.append(
+                        (
+                            text,
+                            next_word,
+                            word_part + char,
+                            char,
+                            text_frames,
+                            new_part_frames,
+                            logit_score + p_char,
+                            idx_history + [idx_char],
+                            lm_logits,
+                        )
+                    )
+        return new_beams
+
+    def get_lm_beams(
+        model,
+        beams,
+        hotword_scorer,
+        cached_lm_scores,
+        cached_partial_token_scores,
+        is_eos,
+    ):
+        lm_score_list = np.zeros(len(beams))
+        language_model = model._language_model
+        new_beams = []
+        for text, next_word, word_part, last_char, frame_list, frames, logit_score, idx_history, lm_logits in beams:
+            new_text = _merge_tokens(text, next_word)
+            if new_text not in cached_lm_scores:
+                _, prev_raw_lm_score, start_state = cached_lm_scores[text]
+                score, end_state = language_model.score(start_state, next_word, is_last_word=is_eos)
+                raw_lm_score = prev_raw_lm_score + score
+                lm_hw_score = raw_lm_score + hotword_scorer.score(new_text)
+                cached_lm_scores[new_text] = (lm_hw_score, raw_lm_score, end_state)
+            lm_score, _, _ = cached_lm_scores[new_text]
+
+            if len(word_part) > 0:
+                if word_part not in cached_partial_token_scores:
+                    # if prefix available in hotword trie use that, otherwise default to char trie
+                    if word_part in hotword_scorer:
+                        cached_partial_token_scores[word_part] = hotword_scorer.score_partial_token(
+                            word_part
+                        )
+                    else:
+                        cached_partial_token_scores[word_part] = language_model.score_partial_token(
+                            word_part
+                        )
+                lm_score += cached_partial_token_scores[word_part]
+    
+            new_beams.append(
+                (
+                    new_text,
+                    "",
+                    word_part,
+                    last_char,
+                    frame_list,
+                    frames,
+                    logit_score,
+                    logit_score + lm_score,
+                    idx_history,
+                    lm_logits,
+                )
+            )
+            lm_score_list[model._vocab2idx[last_char]] = lm_score
+        
+        new_beams_with_lm_logits = []
+        for text, next_word, word_part, last_char, frame_list, frames, logit_score, combined_score, idx_history, lm_logits in new_beams:
+            new_beams_with_lm_logits.append(
+                (
+                    text,
+                    next_word,
+                    word_part,
+                    last_char,
+                    frame_list,
+                    frames,
+                    logit_score,
+                    combined_score,
+                    idx_history,
+                    lm_logits + [lm_score_list],
+                )
+            )
+        return new_beams_with_lm_logits
+
+    language_model = model._language_model
+    if lm_start_state is None and language_model is not None:
+        cached_lm_scores: Dict[str, Tuple[float, float, LMState]] = {
+            "": (0.0, 0.0, language_model.get_start_state())
+        }
+    else:
+        cached_lm_scores = {"": (0.0, 0.0, lm_start_state)}
+    cached_p_lm_scores: Dict[str, float] = {}
+    if not hasattr(model, '_vocab2idx'):
+        model._vocab2idx = {vocab: idx for idx, vocab in model._idx2vocab.items()}
+    beams = [("", "", "", None, [], NULL_FRAMES, 0.0, [], [])] # start with single beam to expand on
+
+    for frame_idx, logit_col in enumerate(logits):
+        idx_list = list(range(0, logit_col.shape[-1]))
+        new_beams = get_new_beams(
+            model,
+            beams,
+            idx_list,
+            frame_idx,
+            logit_col,
+        )
+        scored_beams = get_lm_beams(
+            model,
+            new_beams,
+            hotword_scorer,
+            cached_lm_scores,
+            cached_p_lm_scores,
+            is_eos=False,
+        )
+        beams = [scored_beams[labels[frame_idx]][:-3] + scored_beams[labels[frame_idx]][-2:]]
+    return torch.tensor(np.array(beams[0][-1])).to(args.device)
+
+
+
+def forward_attn(args, model, wavs, lens, labels):
+    def decoder_forward_step(model, inp_tokens, memory, enc_states, enc_lens):
+        """Performs a step in the implemented beamsearcher."""
+        hs, c = memory
+        e = model.emb(inp_tokens)
+        dec_out, hs, c, w = model.dec.forward_step(
+            e, hs, c, enc_states, enc_lens
+        )
+        log_probs = model.softmax(model.fc(dec_out) / model.temperature)
+
+        if model.dec.attn_type == "multiheadlocation":
+            w = torch.mean(w, dim=1)
+        return log_probs, (hs, c), w
+
+    logits = []
+    enc_states = model.encode_batch(wavs, lens)
     enc_lens = torch.tensor([enc_states.shape[1]]).to(args.device)
 
     device = enc_states.device
     batch_size = enc_states.shape[0]
-    memory = greedy_searcher.reset_mem(batch_size, device=device)
+    memory = model.mods.decoder.reset_mem(batch_size, device=device)
 
-    inp_tokens = (enc_states.new_zeros(batch_size).fill_(greedy_searcher.bos_index).long())
-    max_decode_steps = int(enc_states.shape[1] * greedy_searcher.max_decode_ratio)
+    inp_tokens = (enc_states.new_zeros(batch_size).fill_(model.mods.decoder.bos_index).long())
+    max_decode_steps = int(enc_states.shape[1] * model.mods.decoder.max_decode_ratio)
 
-    if gt_wavs == None:
-        for _ in range(max_decode_steps):
-            log_probs, memory, _ = greedy_searcher.forward_step(
-                inp_tokens, memory, enc_states, enc_lens
-            )
-            log_probs_lst.append(log_probs)
+    for decode_step in range(max_decode_steps):
+        log_probs, memory, _ = decoder_forward_step(
+            model.mods.decoder, inp_tokens, memory, enc_states, enc_lens
+        )
+        logits.append(log_probs)
+        # teacher-forcing using beam search
+        if labels != None:
+            inp_tokens = torch.tensor([labels[decode_step]]).to(log_probs.device)
+        else:
             inp_tokens = log_probs.argmax(dim=-1)
-    else:
-        with torch.no_grad():
-            gt_enc_states = model.encode_batch(gt_wavs, wav_lens=torch.ones(len(gt_wavs)).to(args.device))
-            gt_enc_lens = torch.tensor([gt_enc_states.shape[1]]).to(args.device)
+    logits = torch.stack(logits, dim=1).to(args.device)
+    return logits
 
-            gt_memory = greedy_searcher.reset_mem(batch_size, device=device)
-            gt_inp_tokens = (gt_enc_states.new_zeros(batch_size).fill_(greedy_searcher.bos_index).long())
-        for _ in range(max_decode_steps):
-            log_probs, memory, _ = greedy_searcher.forward_step(
-                gt_inp_tokens, memory, enc_states, enc_lens
+
+def forward_trans(args, model, wavs, lens, labels):
+    logits = []
+    encoder_output, encoded_lengths = model(input_signal=wavs, input_signal_length=lens)
+    encoder_output = encoder_output.transpose(1, 2)
+    logitlen = encoded_lengths
+
+    inseq = encoder_output  # [B, T, D]
+    x, out_len, device = inseq, logitlen, inseq.device
+    batchsize = x.shape[0]
+    hypotheses = [rnnt_utils.Hypothesis(score=0.0, y_sequence=[], timestep=[], dec_state=None) for _ in range(batchsize)]
+    hidden = None
+
+    if model.decoding.decoding.preserve_alignments:
+        for hyp in hypotheses:
+            hyp.alignments = [[]]
+
+    last_label = torch.full([batchsize, 1], fill_value=model.decoding.decoding._blank_index, dtype=torch.long, device=device)
+    blank_mask = torch.full([batchsize], fill_value=0, dtype=torch.bool, device=device)
+
+    max_out_len = out_len.max()
+    for time_idx in range(max_out_len):
+        f = x.narrow(dim=1, start=time_idx, length=1)  # [B, 1, D]
+
+        not_blank = True
+        symbols_added = 0
+
+        blank_mask.mul_(False)
+        blank_mask = time_idx >= out_len
+
+        while not_blank and (model.decoding.decoding.max_symbols is None or symbols_added < model.decoding.decoding.max_symbols):
+            if time_idx == 0 and symbols_added == 0 and hidden is None:
+                in_label = model.decoding.decoding._SOS
+            else:
+                in_label = last_label
+            if isinstance(in_label, torch.Tensor) and in_label.dtype != torch.long:
+                in_label = in_label.long()
+                g, hidden_prime = model.decoding.decoding.decoder.predict(None, hidden, False, batchsize)
+            else:
+                if in_label == model.decoding.decoding._SOS:
+                    g, hidden_prime = model.decoding.decoding.decoder.predict(None, hidden, False, batchsize)
+                else:
+                    in_label = label_collate([[in_label.cpu()]])
+                    g, hidden_prime = model.decoding.decoding.decoder.predict(in_label, hidden, False, batchsize)
+
+            logp = model.decoding.decoding.joint.joint(f, g)
+            if not logp.is_cuda:
+                logp = logp.log_softmax(dim=len(logp.shape) - 1)
+            logp = logp[:, 0, 0, :]
+
+            if logp.dtype != torch.float32:
+                logp = logp.float()
+
+            # teacher-forcing using beam search
+            if labels != None:
+                label_idx = len(logits)
+                label = labels[label_idx] if label_idx < len(labels) else model.decoding.decoding._blank_index
+                v, k = logp[:, label], torch.tensor([label for _ in range(logp.shape[0])]).to(logp.device)
+            else:
+                v, k = logp.max(1)
+            del g
+
+            logits.append(logp)
+
+            k_is_blank = k == model.decoding.decoding._blank_index
+            blank_mask.bitwise_or_(k_is_blank)
+            del k_is_blank
+
+            if model.decoding.decoding.preserve_alignments:
+                logp_vals = logp.to('cpu')
+                logp_ids = logp_vals.max(1)[1]
+                for batch_idx in range(batchsize):
+                    if time_idx < out_len[batch_idx]:
+                        hypotheses[batch_idx].alignments[-2].append(
+                            (logp_vals[batch_idx], logp_ids[batch_idx])
+                        )
+                del logp_vals
+
+            if blank_mask.all():
+                not_blank = False
+                if model.decoding.decoding.preserve_alignments:
+                    for batch_idx in range(batchsize):
+                        if len(hypotheses[batch_idx].alignments[-2]) > 0:
+                            hypotheses[batch_idx].alignments.append([])  # blank buffer for next timestep
+            else:
+                blank_indices = (blank_mask == 1).nonzero(as_tuple=False)
+                if hidden is not None:
+                    hidden_prime = model.decoding.decoding.decoder.batch_copy_states(hidden_prime, hidden, blank_indices)
+                elif len(blank_indices) > 0 and hidden is None:
+                    hidden_prime = model.decoding.decoding.decoder.batch_copy_states(hidden_prime, None, blank_indices, value=0.0)
+                k[blank_indices] = last_label[blank_indices, 0]
+                last_label = k.clone().view(-1, 1)
+                hidden = hidden_prime
+                for kidx, ki in enumerate(k):
+                    if blank_mask[kidx] == 0:
+                        hypotheses[kidx].y_sequence.append(ki)
+                        hypotheses[kidx].timestep.append(time_idx)
+                        hypotheses[kidx].score += float(v[kidx])
+
+                symbols_added += 1
+    logits = torch.stack(logits, dim=1)[:, :max_out_len, :]
+    return logits
+
+
+def get_logits_and_pseudo_labels(args, model, processor, wavs, lens):
+    if args.decoding_method == "greedy_search" or args.beam_width == 1: # greedy search
+        logits = forward_batch(args, model, processor, wavs, lens)
+        pseudo_labels = [torch.argmax(logits, dim=-1).squeeze(0)]
+    else: # beam search
+        encoder_output, encoder_length = encode_batch(args, model, wavs, lens)
+        pseudo_labels = decode_batch(args, model, processor, encoder_output, encoder_length)
+        logits = forward_batch(args, model, processor, wavs, lens, labels=pseudo_labels[0])
+    return logits, pseudo_labels
+
+
+@torch.no_grad()
+def encode_batch(args, model, wavs, lens):
+    if isinstance(model, Wav2Vec2ForCTC):
+        logits = model(wavs).logits
+        logitlen = torch.tensor([logits.shape[1]]).to(logits.device)
+        outputs = logits, logitlen
+    elif isinstance(model, EncoderDecoderASR):
+        enc_states = model.encode_batch(wavs, lens)
+        enc_lens = torch.tensor([enc_states.shape[1]]).to(args.device)
+        outputs = enc_states, enc_lens
+    elif isinstance(model, nemo_asr.models.EncDecCTCModelBPE):
+        processed_signal, processed_signal_length = model.preprocessor(
+            input_signal=wavs.to(args.device), length=lens.to(args.device),
+        )
+        encoder_output, encoder_length = model.encoder(
+            audio_signal=processed_signal, length=processed_signal_length
+        )
+        outputs = encoder_output, encoder_length
+    elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
+        enc_states, enc_lens = model(input_signal=wavs, input_signal_length=lens)
+        enc_states = enc_states.transpose(1, 2)
+        outputs = enc_states, enc_lens
+    return outputs
+
+
+@torch.no_grad()
+def decode_batch(args, model, processor, encoder_output, encoder_length):
+    beam_width = args.beam_width if args.decoding_method == "beam_search" else 1
+    if isinstance(model, Wav2Vec2ForCTC):
+        pseudo_labels = decode_ctc_or_conformer(
+            processor.decoder,
+            logits=np.clip(log_softmax(encoder_output.squeeze(0).detach().cpu().numpy(), axis=1), np.log(MIN_TOKEN_CLIP_P), 0),
+            beam_width=beam_width,
+            beam_prune_logp=DEFAULT_PRUNE_LOGP,
+            token_min_logp=DEFAULT_MIN_TOKEN_LOGP,
+            prune_history=DEFAULT_PRUNE_BEAMS,
+            hotword_scorer=HotwordScorer.build_scorer(None, weight=DEFAULT_HOTWORD_WEIGHT),
+            lm_start_state=None,
+        )
+    elif isinstance(model, EncoderDecoderASR):
+        model.mods.decoder.topk = beam_width
+        pseudo_labels = decode_attn(
+            model.mods.decoder,
+            encoder_output,
+            torch.ones(1).to(encoder_output.device),
+            beam_width,
+        )
+    elif isinstance(model, nemo_asr.models.EncDecCTCModelBPE):
+        logits = model.decoder(encoder_output=encoder_output)
+        pseudo_labels = decode_ctc_or_conformer(
+            processor,
+            logits=np.clip(log_softmax(logits.squeeze(0).detach().cpu().numpy(), axis=1), np.log(MIN_TOKEN_CLIP_P), 0),
+            beam_width=beam_width,
+            beam_prune_logp=DEFAULT_PRUNE_LOGP,
+            token_min_logp=DEFAULT_MIN_TOKEN_LOGP,
+            prune_history=DEFAULT_PRUNE_BEAMS,
+            hotword_scorer=HotwordScorer.build_scorer(None, weight=DEFAULT_HOTWORD_WEIGHT),
+            lm_start_state=None,
+        )
+    elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
+        processor.beam_size = beam_width
+        pseudo_labels = decode_trans(processor, encoder_output, encoder_length)
+    return pseudo_labels
+
+
+def decode_ctc_or_conformer(
+    model,
+    logits,
+    beam_width,
+    beam_prune_logp,
+    token_min_logp,
+    prune_history,
+    hotword_scorer,
+    lm_start_state,
+):
+    def _merge_beams(beams):
+        """Merge beams with same prefix together."""
+        beam_dict = {}
+        for text, next_word, word_part, last_char, text_frames, part_frames, logit_score, idx_history in beams:
+            new_text = _merge_tokens(text, next_word)
+            hash_idx = (new_text, word_part, last_char)
+            if hash_idx not in beam_dict:
+                beam_dict[hash_idx] = (
+                    text,
+                    next_word,
+                    word_part,
+                    last_char,
+                    text_frames,
+                    part_frames,
+                    logit_score,
+                    idx_history
+                )
+            else:
+                beam_dict[hash_idx] = (
+                    text,
+                    next_word,
+                    word_part,
+                    last_char,
+                    text_frames,
+                    part_frames,
+                    _sum_log_scores(beam_dict[hash_idx][-2], logit_score),
+                    idx_history
+                )
+        return list(beam_dict.values())
+
+    def _sort_and_trim_beams(beams, beam_width: int):
+        """Take top N beams by score."""
+        return heapq.nlargest(beam_width, beams, key=lambda x: x[-2])
+
+    def _merge_tokens(token_1: str, token_2: str) -> str:
+        """Fast, whitespace safe merging of tokens."""
+        if len(token_2) == 0:
+            text = token_1
+        elif len(token_1) == 0:
+            text = token_2
+        else:
+            text = token_1 + " " + token_2
+        return text
+
+    def _sum_log_scores(s1: float, s2: float) -> float:
+        """Sum log odds in a numerically stable way."""
+        # this is slightly faster than using max
+        if s1 >= s2:
+            log_sum = s1 + math.log(1 + math.exp(s2 - s1))
+        else:
+            log_sum = s2 + math.log(1 + math.exp(s1 - s2))
+        return log_sum
+
+    def get_new_beams(
+        model,
+        beams,
+        idx_list,
+        frame_idx,
+        logit_col,
+    ):
+        new_beams = []
+        # bpe we can also have trailing word boundaries ▁⁇▁ so we may need to remember breaks
+        force_next_break = False
+
+        for idx_char in idx_list:
+            p_char = logit_col[idx_char]
+            char = model._idx2vocab[idx_char]
+            for (
+                text,
+                next_word,
+                word_part,
+                last_char,
+                text_frames,
+                part_frames,
+                logit_score,
+                idx_history,
+            ) in beams:
+                if char == "" or last_char == char:
+                    if char == "":
+                        new_end_frame = part_frames[0]
+                    else:
+                        new_end_frame = frame_idx + 1
+                    new_part_frames = (
+                        part_frames if char == "" else (part_frames[0], new_end_frame)
+                    )
+                    new_beams.append(
+                        (
+                            text,
+                            next_word,
+                            word_part,
+                            char,
+                            text_frames,
+                            new_part_frames,
+                            logit_score + p_char,
+                            idx_history + [idx_char],
+                        )
+                    )
+                # if bpe and leading space char
+                elif model._is_bpe and (char[:1] == BPE_TOKEN or force_next_break):
+                    force_next_break = False
+                    # some tokens are bounded on both sides like ▁⁇▁
+                    clean_char = char
+                    if char[:1] == BPE_TOKEN:
+                        clean_char = clean_char[1:]
+                    if char[-1:] == BPE_TOKEN:
+                        clean_char = clean_char[:-1]
+                        force_next_break = True
+                    new_frame_list = (
+                        text_frames if word_part == "" else text_frames + [part_frames]
+                    )
+                    new_beams.append(
+                        (
+                            text,
+                            word_part,
+                            clean_char,
+                            char,
+                            new_frame_list,
+                            (frame_idx, frame_idx + 1),
+                            logit_score + p_char,
+                            idx_history + [idx_char],
+                        )
+                    )
+                # if not bpe and space char
+                elif not model._is_bpe and char == " ":
+                    new_frame_list = (
+                        text_frames if word_part == "" else text_frames + [part_frames]
+                    )
+                    new_beams.append(
+                        (
+                            text,
+                            word_part,
+                            "",
+                            char,
+                            new_frame_list,
+                            NULL_FRAMES,
+                            logit_score + p_char,
+                            idx_history + [idx_char],
+                        )
+                    )
+                # general update of continuing token without space
+                else:
+                    new_part_frames = (
+                        (frame_idx, frame_idx + 1)
+                        if part_frames[0] < 0
+                        else (part_frames[0], frame_idx + 1)
+                    )
+                    new_beams.append(
+                        (
+                            text,
+                            next_word,
+                            word_part + char,
+                            char,
+                            text_frames,
+                            new_part_frames,
+                            logit_score + p_char,
+                            idx_history + [idx_char],
+                        )
+                    )
+        new_beams = _merge_beams(new_beams)
+        return new_beams
+
+    def get_lm_beams(
+        model,
+        beams,
+        hotword_scorer: HotwordScorer,
+        cached_lm_scores: Dict[str, Tuple[float, float, LMState]],
+        cached_partial_token_scores: Dict[str, float],
+        is_eos: bool = False,
+    ) -> List[LMBeam]:
+        """Update score by averaging logit_score and lm_score."""
+        # get language model and see if exists
+        language_model = model._language_model
+
+        # if no language model available then return raw score + hotwords as lm score
+        if language_model is None:
+            new_beams = []
+            for text, next_word, word_part, last_char, frame_list, frames, logit_score, idx_history in beams:
+                new_text = _merge_tokens(text, next_word)
+                # note that usually this gets scaled with alpha
+                lm_hw_score = (
+                    logit_score
+                    + hotword_scorer.score(new_text)
+                    + hotword_scorer.score_partial_token(word_part)
+                )
+                new_beams.append(
+                    (
+                        new_text,
+                        "",
+                        word_part,
+                        last_char,
+                        frame_list,
+                        frames,
+                        logit_score,
+                        lm_hw_score,
+                        idx_history
+                    )
+                )
+            return new_beams
+
+        new_beams = []
+        for text, next_word, word_part, last_char, frame_list, frames, logit_score, idx_history in beams:
+            new_text = _merge_tokens(text, next_word)
+            if new_text not in cached_lm_scores:
+                _, prev_raw_lm_score, start_state = cached_lm_scores[text]
+                score, end_state = language_model.score(start_state, next_word, is_last_word=is_eos)
+                raw_lm_score = prev_raw_lm_score + score
+                lm_hw_score = raw_lm_score + hotword_scorer.score(new_text)
+                cached_lm_scores[new_text] = (lm_hw_score, raw_lm_score, end_state)
+            lm_score, _, _ = cached_lm_scores[new_text]
+
+            if len(word_part) > 0:
+                if word_part not in cached_partial_token_scores:
+                    # if prefix available in hotword trie use that, otherwise default to char trie
+                    if word_part in hotword_scorer:
+                        cached_partial_token_scores[word_part] = hotword_scorer.score_partial_token(
+                            word_part
+                        )
+                    else:
+                        cached_partial_token_scores[word_part] = language_model.score_partial_token(
+                            word_part
+                        )
+                lm_score += cached_partial_token_scores[word_part]
+
+            new_beams.append(
+                (
+                    new_text,
+                    "",
+                    word_part,
+                    last_char,
+                    frame_list,
+                    frames,
+                    logit_score,
+                    logit_score + lm_score,
+                    idx_history,
+                )
+            )
+        return new_beams
+
+    language_model = model._language_model
+    if lm_start_state is None and language_model is not None:
+        cached_lm_scores: Dict[str, Tuple[float, float, LMState]] = {
+            "": (0.0, 0.0, language_model.get_start_state())
+        }
+    else:
+        cached_lm_scores = {"": (0.0, 0.0, lm_start_state)}
+    cached_p_lm_scores: Dict[str, float] = {}
+    # start with single beam to expand on
+    beams = [("", "", "", None, [], NULL_FRAMES, 0.0, [])]
+
+    for frame_idx, logit_col in enumerate(logits):
+        max_idx = logit_col.argmax()
+        idx_list = set(np.where(logit_col >= token_min_logp)[0]) | {max_idx}
+        new_beams = get_new_beams(
+            model,
+            beams,
+            idx_list,
+            frame_idx,
+            logit_col,
+        )
+        # lm scoring and beam pruning
+        scored_beams = get_lm_beams(
+            model,
+            new_beams,
+            hotword_scorer,
+            cached_lm_scores,
+            cached_p_lm_scores,
+        )
+
+        # remove beam outliers
+        max_score = max([b[-2] for b in scored_beams])
+        scored_beams = [b for b in scored_beams if b[-2] >= max_score + beam_prune_logp]
+        trimmed_beams = _sort_and_trim_beams(scored_beams, beam_width)
+        beams = [b[:-2] + (b[-1], ) for b in trimmed_beams]
+
+    new_beams = []
+    for text, _, word_part, _, frame_list, frames, logit_score, idx_history in beams:
+        new_token_times = frame_list if word_part == "" else frame_list + [frames]
+        new_beams.append((text, word_part, "", None, new_token_times, (-1, -1), logit_score, idx_history))
+    new_beams = _merge_beams(new_beams)
+    scored_beams = get_lm_beams(
+        model,
+        new_beams,
+        hotword_scorer,
+        cached_lm_scores,
+        cached_p_lm_scores,
+        is_eos=True,
+    )
+    scored_beams = [b[:-2] + (b[-1], ) for b in scored_beams]
+    scored_beams = _merge_beams(scored_beams)
+
+    # remove beam outliers
+    max_score = max([b[-2] for b in beams])
+    scored_beams = [b for b in beams if b[-2] >= max_score + beam_prune_logp]
+    trimmed_beams = _sort_and_trim_beams(scored_beams, beam_width)
+
+    # remove unnecessary information from beams
+    output_beams = [
+        torch.tensor(idx_history)
+        for _, _, _, _, _, _, _, idx_history in trimmed_beams
+    ]
+    return output_beams
+
+
+def decode_attn(model, enc_states, wav_len, beam_width):
+    def inflate_tensor(tensor, times, dim):
+        return torch.repeat_interleave(tensor, times, dim=dim)
+
+    def mask_by_condition(tensor, cond, fill_value):
+        tensor = torch.where(
+            cond, tensor, torch.Tensor([fill_value]).to(tensor.device)
+        )
+        return tensor
+
+    def forward_step(model, inp_tokens, memory, enc_states, enc_lens):
+        """Performs a step in the implemented beamsearcher."""
+        hs, c = memory
+        e = model.emb(inp_tokens)
+        dec_out, hs, c, w = model.dec.forward_step(
+            e, hs, c, enc_states, enc_lens
+        )
+        log_probs = model.softmax(model.fc(dec_out) / model.temperature)
+        if model.dec.attn_type == "multiheadlocation":
+            w = torch.mean(w, dim=1)
+        return log_probs, (hs, c), w
+
+    def lm_forward_step(model, inp_tokens, memory):
+        """Applies a step to the LM during beamsearch."""
+        with torch.no_grad():
+            logits, hs = model.lm(inp_tokens, hx=memory)
+            log_probs = model.log_softmax(logits / model.temperature_lm)
+        return log_probs, hs
+
+    def ctc_forward_step(model, x):
+        """Applies a ctc step during bramsearch."""
+        logits = model.ctc_fc(x)
+        log_probs = model.softmax(logits)
+        return log_probs
+
+    enc_lens = torch.round(enc_states.shape[1] * wav_len).int()
+    device = enc_states.device
+    batch_size = enc_states.shape[0]
+
+    memory = model.reset_mem(batch_size * beam_width, device=device)
+
+    if model.lm_weight > 0:
+        lm_memory = model.reset_lm_mem(batch_size * beam_width, device)
+
+    if model.ctc_weight > 0:
+        # (batch_size * beam_size, L, vocab_size)
+        ctc_outputs = ctc_forward_step(model, enc_states)
+        ctc_scorer = CTCPrefixScorer(
+            ctc_outputs,
+            enc_lens,
+            batch_size,
+            beam_width,
+            model.blank_index,
+            model.eos_index,
+            model.ctc_window_size,
+        )
+        ctc_memory = None
+
+    # Inflate the enc_states and enc_len by beam_size times
+    enc_states = inflate_tensor(enc_states, times=beam_width, dim=0)
+    enc_lens = inflate_tensor(enc_lens, times=beam_width, dim=0)
+
+    # Using bos as the first input
+    inp_tokens = (
+        torch.zeros(batch_size * beam_width, device=device)
+        .fill_(model.bos_index)
+        .long()
+    )
+
+    # The first index of each sentence.
+    model.beam_offset = (
+        torch.arange(batch_size, device=device) * beam_width
+    )
+
+    # initialize sequence scores variables.
+    sequence_scores = torch.empty(
+        batch_size * beam_width, device=device
+    )
+    sequence_scores.fill_(float("-inf"))
+
+    # keep only the first to make sure no redundancy.
+    sequence_scores.index_fill_(0, model.beam_offset, 0.0)
+
+    # keep the hypothesis that reaches eos and their corresponding score and log_probs.
+    hyps_and_scores = [[] for _ in range(batch_size)]
+
+    # keep the sequences that still not reaches eos.
+    alived_seq = torch.empty(
+        batch_size * beam_width, 0, device=device
+    ).long()
+
+    # Keep the log-probabilities of alived sequences.
+    alived_log_probs = torch.empty(
+        batch_size * beam_width, 0, device=device
+    )
+
+    min_decode_steps = int(enc_states.shape[1] * model.min_decode_ratio)
+    max_decode_steps = int(enc_states.shape[1] * model.max_decode_ratio)
+
+    # Initialize the previous attention peak to zero
+    # This variable will be used when using_max_attn_shift=True
+    prev_attn_peak = torch.zeros(batch_size * beam_width, device=device)
+
+    for t in range(max_decode_steps):
+        # terminate condition
+        if model._check_full_beams(hyps_and_scores, beam_width):
+            break
+            
+        log_probs, memory, attn = forward_step(
+            model, inp_tokens, memory, enc_states, enc_lens
+        )
+        log_probs = model.att_weight * log_probs
+
+        # Keep the original value
+        log_probs_clone = log_probs.clone().reshape(batch_size, -1)
+        vocab_size = log_probs.shape[-1]
+
+        if model.using_max_attn_shift:
+            # Block the candidates that exceed the max shift
+            cond, attn_peak = model._check_attn_shift(attn, prev_attn_peak)
+            log_probs = mask_by_condition(
+                log_probs, cond, fill_value=model.minus_inf
+            )
+            prev_attn_peak = attn_peak
+
+        # Set eos to minus_inf when less than minimum steps.
+        if t < min_decode_steps:
+            log_probs[:, model.eos_index] = model.minus_inf
+
+        # Set the eos prob to minus_inf when it doesn't exceed threshold.
+        if model.using_eos_threshold:
+            cond = model._check_eos_threshold(log_probs)
+            log_probs[:, model.eos_index] = mask_by_condition(
+                log_probs[:, model.eos_index],
+                cond,
+                fill_value=model.minus_inf,
             )
 
-            with torch.no_grad():
-                gt_log_probs, gt_memory, _ = greedy_searcher.forward_step(
-                    gt_inp_tokens, gt_memory, gt_enc_states, gt_enc_lens
+        # adding LM scores to log_prob if lm_weight > 0
+        if model.lm_weight > 0:
+            lm_log_probs, lm_memory = lm_forward_step(
+                model, inp_tokens, lm_memory,
+            )
+            log_probs = log_probs + model.lm_weight * lm_log_probs
+        
+        # adding CTC scores to log_prob if ctc_weight > 0
+        if model.ctc_weight > 0:
+            g = alived_seq
+            # block blank token
+            log_probs[:, model.blank_index] = model.minus_inf
+            if model.ctc_weight != 1.0 and model.ctc_score_mode == "partial":
+                # pruning vocab for ctc_scorer
+                _, ctc_candidates = log_probs.topk(
+                    beam_width * 2, dim=-1
                 )
-                gt_inp_tokens = gt_log_probs.argmax(dim=-1)
+            else:
+                ctc_candidates = None
 
-            log_probs_lst.append(log_probs)
-    return log_probs_lst
+            ctc_log_probs, ctc_memory = ctc_scorer.forward_step(
+                g, ctc_memory, ctc_candidates, attn
+            )
+            log_probs = log_probs + model.ctc_weight * ctc_log_probs
+
+        scores = sequence_scores.unsqueeze(1).expand(-1, vocab_size)
+        scores = scores + log_probs
+
+        # length normalization
+        if model.length_normalization:
+            scores = scores / (t + 1)
+
+        scores_timestep = scores.clone()
+
+        # keep topk beams
+        scores, candidates = scores.view(batch_size, -1).topk(
+            beam_width, dim=-1
+        )
+
+        # The input for the next step, also the output of current step.
+        inp_tokens = (candidates % vocab_size).view(
+            batch_size * beam_width
+        )
+
+        scores = scores.view(batch_size * beam_width)
+        sequence_scores = scores
+
+        # recover the length normalization
+        if model.length_normalization:
+            sequence_scores = sequence_scores * (t + 1)
+
+        # The index of which beam the current top-K output came from in (t-1) timesteps.
+        predecessors = (
+            torch.div(candidates, vocab_size, rounding_mode="floor")
+            + model.beam_offset.unsqueeze(1).expand_as(candidates)
+        ).view(batch_size * beam_width)
+
+        # Permute the memory to synchoronize with the output.
+        memory = model.permute_mem(memory, index=predecessors)
+        if model.lm_weight > 0:
+            lm_memory = model.permute_lm_mem(lm_memory, index=predecessors)
+
+        if model.ctc_weight > 0:
+            ctc_memory = ctc_scorer.permute_mem(ctc_memory, candidates)
+
+        # If using_max_attn_shift, then the previous attn peak has to be permuted too.
+        if model.using_max_attn_shift:
+            prev_attn_peak = torch.index_select(
+                prev_attn_peak, dim=0, index=predecessors
+            )
+
+        # Add coverage penalty
+        if model.coverage_penalty > 0:
+            cur_attn = torch.index_select(attn, dim=0, index=predecessors)
+
+            # coverage: cumulative attention probability vector
+            if t == 0:
+                # Init coverage
+                model.coverage = cur_attn
+
+            # the attn of transformer is [batch_size*beam_size, current_step, source_len]
+            if len(cur_attn.size()) > 2:
+                model.converage = torch.sum(cur_attn, dim=1)
+            else:
+                # Update coverage
+                model.coverage = torch.index_select(
+                    model.coverage, dim=0, index=predecessors
+                )
+                model.coverage = model.coverage + cur_attn
+
+            # Compute coverage penalty and add it to scores
+            penalty = torch.max(
+                model.coverage, model.coverage.clone().fill_(0.5)
+            ).sum(-1)
+            penalty = penalty - model.coverage.size(-1) * 0.5
+            penalty = penalty.view(batch_size * beam_width)
+            penalty = (
+                penalty / (t + 1) if model.length_normalization else penalty
+            )
+            scores = scores - penalty * model.coverage_penalty
+
+        # Update alived_seq
+        alived_seq = torch.cat(
+            [
+                torch.index_select(alived_seq, dim=0, index=predecessors),
+                inp_tokens.unsqueeze(1),
+            ],
+            dim=-1,
+        )
+
+        # Takes the log-probabilities
+        beam_log_probs = log_probs_clone[
+            torch.arange(batch_size).unsqueeze(1), candidates
+        ].reshape(batch_size * beam_width)
+        alived_log_probs = torch.cat(
+            [
+                torch.index_select(
+                    alived_log_probs, dim=0, index=predecessors
+                ),
+                beam_log_probs.unsqueeze(1),
+            ],
+            dim=-1,
+        )
+
+        is_eos = model._update_hyp_and_scores(
+            inp_tokens,
+            alived_seq,
+            alived_log_probs,
+            hyps_and_scores,
+            scores,
+            timesteps=t,
+        )
+
+        # Block the paths that have reached eos.
+        sequence_scores.masked_fill_(is_eos, float("-inf"))
+
+    if not model._check_full_beams(hyps_and_scores, beam_width):
+        # Using all eos to fill-up the hyps.
+        eos = (
+            torch.zeros(batch_size * beam_width, device=device)
+            .fill_(model.eos_index)
+            .long()
+        )
+        _ = model._update_hyp_and_scores(
+            eos,
+            alived_seq,
+            alived_log_probs,
+            hyps_and_scores,
+            scores,
+            timesteps=max_decode_steps,
+        )
+    
+    topk_hyps, _, _, _, = model._get_top_score_prediction(hyps_and_scores, topk=beam_width)
+    pseudo_labels = list(torch.unbind(topk_hyps.squeeze(0), dim=0))
+    aux_label = [torch.tensor([model.blank_index for _ in range(max_decode_steps)])]
+    pseudo_labels = pad_sequence(pseudo_labels + aux_label, batch_first=True, padding_value=model.blank_index)[:beam_width, :max_decode_steps]
+    return pseudo_labels
 
 
-def forward_trans(args, model, wavs, lens, gt_wavs=None):
-    log_probs_lst = []
+def decode_trans(model, h, encoded_lengths):
+    # Initialize states
+    beam = min(model.beam_size, model.vocab_size)
+    beam_k = min(beam, (model.vocab_size - 1))
 
-    if gt_wavs == None:
-        encoder_output, encoded_lengths = model(input_signal=wavs, input_signal_length=lens)
-        encoder_output = encoder_output.transpose(1, 2)
-        logitlen = encoded_lengths
+    blank_tensor = torch.tensor([model.blank], device=h.device, dtype=torch.long)
 
-        inseq = encoder_output  # [B, T, D]
-        x, out_len, device = inseq, logitlen, inseq.device
-        batchsize = x.shape[0]
-        hypotheses = [rnnt_utils.Hypothesis(score=0.0, y_sequence=[], timestep=[], dec_state=None) for _ in range(batchsize)]
-        hidden = None
+    # Precompute some constants for blank position
+    ids = list(range(model.vocab_size + 1))
+    ids.remove(model.blank)
 
-        if model.decoding.decoding.preserve_alignments:
-            for hyp in hypotheses:
-                hyp.alignments = [[]]
-
-        last_label = torch.full([batchsize, 1], fill_value=model.decoding.decoding._blank_index, dtype=torch.long, device=device)
-        blank_mask = torch.full([batchsize], fill_value=0, dtype=torch.bool, device=device)
-
-        max_out_len = out_len.max()
-        for time_idx in range(max_out_len):
-            f = x.narrow(dim=1, start=time_idx, length=1)  # [B, 1, D]
-
-            not_blank = True
-            symbols_added = 0
-
-            blank_mask.mul_(False)
-            blank_mask = time_idx >= out_len
-
-            while not_blank and (model.decoding.decoding.max_symbols is None or symbols_added < model.decoding.decoding.max_symbols):
-                if time_idx == 0 and symbols_added == 0 and hidden is None:
-                    in_label = model.decoding.decoding._SOS
-                else:
-                    in_label = last_label
-                if isinstance(in_label, torch.Tensor) and in_label.dtype != torch.long:
-                    in_label = in_label.long()
-                    g, hidden_prime = model.decoding.decoding.decoder.predict(None, hidden, False, batchsize)
-                else:
-                    if in_label == model.decoding.decoding._SOS:
-                        g, hidden_prime = model.decoding.decoding.decoder.predict(None, hidden, False, batchsize)
-                    else:
-                        in_label = label_collate([[in_label.cpu()]])
-                        g, hidden_prime = model.decoding.decoding.decoder.predict(in_label, hidden, False, batchsize)
-
-                logp = model.decoding.decoding.joint.joint(f, g)
-                if not logp.is_cuda:
-                    logp = logp.log_softmax(dim=len(logp.shape) - 1)
-                logp = logp[:, 0, 0, :]
-                log_probs_lst.append(logp)
-
-                if logp.dtype != torch.float32:
-                    logp = logp.float()
-
-                v, k = logp.max(1)
-                del g
-
-                k_is_blank = k == model.decoding.decoding._blank_index
-                blank_mask.bitwise_or_(k_is_blank)
-                del k_is_blank
-
-                if model.decoding.decoding.preserve_alignments:
-                    logp_vals = logp.to('cpu')
-                    logp_ids = logp_vals.max(1)[1]
-                    for batch_idx in range(batchsize):
-                        if time_idx < out_len[batch_idx]:
-                            hypotheses[batch_idx].alignments[-1].append(
-                                (logp_vals[batch_idx], logp_ids[batch_idx])
-                            )
-                    del logp_vals
-
-                if blank_mask.all():
-                    not_blank = False
-                    if model.decoding.decoding.preserve_alignments:
-                        for batch_idx in range(batchsize):
-                            if len(hypotheses[batch_idx].alignments[-1]) > 0:
-                                hypotheses[batch_idx].alignments.append([])  # blank buffer for next timestep
-                else:
-                    blank_indices = (blank_mask == 1).nonzero(as_tuple=False)
-                    if hidden is not None:
-                        hidden_prime = model.decoding.decoding.decoder.batch_copy_states(hidden_prime, hidden, blank_indices)
-                    elif len(blank_indices) > 0 and hidden is None:
-                        hidden_prime = model.decoding.decoding.decoder.batch_copy_states(hidden_prime, None, blank_indices, value=0.0)
-                    k[blank_indices] = last_label[blank_indices, 0]
-                    last_label = k.clone().view(-1, 1)
-                    hidden = hidden_prime
-                    for kidx, ki in enumerate(k):
-                        if blank_mask[kidx] == 0:
-                            hypotheses[kidx].y_sequence.append(ki)
-                            hypotheses[kidx].timestep.append(time_idx)
-                            hypotheses[kidx].score += float(v[kidx])
-
-                    symbols_added += 1
+    # Used when blank token is first vs last token
+    if model.blank == 0:
+        index_incr = 1
     else:
-        encoder_output, encoded_lengths = model(input_signal=wavs, input_signal_length=lens)
-        encoder_output = encoder_output.transpose(1, 2)
-        logitlen = encoded_lengths
+        index_incr = 0
 
-        # teacher-forcing
-        gt_encoder_output, _ = model(input_signal=gt_wavs, input_signal_length=lens)
-        gt_encoder_output = gt_encoder_output.transpose(1, 2)
+    # Initialize zero vector states
+    dec_state = model.decoder.initialize_state(h)
 
-        inseq = encoder_output  # [B, T, D]
-        x, out_len, device = inseq, logitlen, inseq.device
-        batchsize = x.shape[0]
-        hypotheses = [rnnt_utils.Hypothesis(score=0.0, y_sequence=[], timestep=[], dec_state=None) for _ in range(batchsize)]
-        hidden = None
+    # Initialize first hypothesis for the beam (blank)
+    kept_hyps = [Hypothesis(score=0.0, y_sequence=[model.blank], dec_state=dec_state, timestep=[-1], length=0, token_list=[])]
+    cache = {}
 
-        # teacher-forcing
-        gt_x = gt_encoder_output
-        gt_hypotheses = [rnnt_utils.Hypothesis(score=0.0, y_sequence=[], timestep=[], dec_state=None) for _ in range(batchsize)]
-        gt_hidden = None
+    for i in range(int(encoded_lengths)):
+        hi = h[:, i : i + 1, :]  # [1, 1, D]
+        hyps = kept_hyps
+        kept_hyps = []
 
-        if model.decoding.decoding.preserve_alignments:
-            for hyp in hypotheses:
-                hyp.alignments = [[]]
+        while True:
+            max_hyp = max(hyps, key=lambda x: x.score)
+            hyps.remove(max_hyp)
 
-        last_label = torch.full([batchsize, 1], fill_value=model.decoding.decoding._blank_index, dtype=torch.long, device=device)
-        blank_mask = torch.full([batchsize], fill_value=0, dtype=torch.bool, device=device)
+            # update decoder state and get next score
+            y, state, lm_state = model.decoder.score_hypothesis(max_hyp, cache)  # [1, 1, D]
 
-        # teacher-forcing
-        gt_last_label = torch.full([batchsize, 1], fill_value=model.decoding.decoding._blank_index, dtype=torch.long, device=device)
-        gt_blank_mask = torch.full([batchsize], fill_value=0, dtype=torch.bool, device=device)
+            # get next token
+            logit = model.joint.joint(hi, y) / model.softmax_temperature
+            ytu = torch.log_softmax(logit, dim=-1)  # [1, 1, 1, V + 1]
+            ytu = ytu[0, 0, 0, :]  # [V + 1]
 
-        batchsize = x.shape[0]
+            # remove blank token before top k
+            top_k = ytu[ids].topk(beam_k, dim=-1)
 
-        max_out_len = out_len.max()
-        for time_idx in range(max_out_len):
-            f = x.narrow(dim=1, start=time_idx, length=1)  # [B, 1, D]
+            # Two possible steps - blank token or non-blank token predicted
+            ytu = (
+                torch.cat((top_k[0], ytu[model.blank].unsqueeze(0))),
+                torch.cat((top_k[1] + index_incr, blank_tensor)),
+            )
 
-            not_blank = True
-            symbols_added = 0
+            # for each possible step
+            for logp, k in zip(*ytu):
+                # construct hypothesis for step
+                new_hyp = Hypothesis(
+                    score=(max_hyp.score + float(logp)),
+                    y_sequence=max_hyp.y_sequence[:],
+                    dec_state=max_hyp.dec_state,
+                    lm_state=max_hyp.lm_state,
+                    timestep=max_hyp.timestep[:],
+                    length=encoded_lengths,
+                    token_list=max_hyp.token_list+[k],
+                )
 
-            blank_mask.mul_(False)
-            blank_mask = time_idx >= out_len
-
-            while not_blank and (model.decoding.decoding.max_symbols is None or symbols_added < model.decoding.decoding.max_symbols):
-                if time_idx == 0 and symbols_added == 0 and hidden is None:
-                    in_label = model.decoding.decoding._SOS
+                # if current token is blank, dont update sequence, just store the current hypothesis
+                if k == model.blank:
+                    kept_hyps.append(new_hyp)
                 else:
-                    in_label = gt_last_label
-                if isinstance(in_label, torch.Tensor) and in_label.dtype != torch.long:
-                    in_label = in_label.long()
-                    g, hidden_prime = model.decoding.decoding.decoder.predict(None, hidden, False, batchsize)
-                else:
-                    if in_label == model.decoding.decoding._SOS:
-                        g, hidden_prime = model.decoding.decoding.decoder.predict(None, hidden, False, batchsize)
-                    else:
-                        in_label = label_collate([[in_label.cpu()]])
-                        g, hidden_prime = model.decoding.decoding.decoder.predict(in_label, hidden, False, batchsize)
+                    # if non-blank token was predicted, update state and sequence and then search more hypothesis
+                    new_hyp.dec_state = state
+                    new_hyp.y_sequence.append(int(k))
+                    new_hyp.timestep.append(i)
+                    hyps.append(new_hyp)
 
-                logp = model.decoding.decoding.joint.joint(f, g)
-                if not logp.is_cuda:
-                    logp = logp.log_softmax(dim=len(logp.shape) - 1)
-                logp = logp[:, 0, 0, :]
-                log_probs_lst.append(logp)
+            # keep those hypothesis that have scores greater than next search generation
+            hyps_max = float(max(hyps, key=lambda x: x.score).score)
+            kept_most_prob = sorted([hyp for hyp in kept_hyps if hyp.score > hyps_max], key=lambda x: x.score,)
 
-                if logp.dtype != torch.float32:
-                    logp = logp.float()
+            # If enough hypothesis have scores greater than next search generation, stop beam search.
+            if len(kept_most_prob) >= beam:
+                kept_hyps = kept_most_prob
+                break
 
-                v, k = logp.max(1)
-
-                k_is_blank = k == model.decoding.decoding._blank_index
-
-                blank_mask.bitwise_or_(k_is_blank)
-
-                if model.decoding.decoding.preserve_alignments:
-                    logp_vals = logp.to('cpu')
-                    logp_ids = logp_vals.max(1)[1]
-                    for batch_idx in range(batchsize):
-                        if time_idx < out_len[batch_idx]:
-                            hypotheses[batch_idx].alignments[-1].append(
-                                (logp_vals[batch_idx], logp_ids[batch_idx])
-                            )
-
-                if blank_mask.all():
-                    not_blank = False
-                    if model.decoding.decoding.preserve_alignments:
-                        for batch_idx in range(batchsize):
-                            if len(hypotheses[batch_idx].alignments[-1]) > 0:
-                                hypotheses[batch_idx].alignments.append([])  # blank buffer for next timestep
-                else:
-                    blank_indices = (blank_mask == 1).nonzero(as_tuple=False)
-                    if hidden is not None:
-                        hidden_prime = model.decoding.decoding.decoder.batch_copy_states(hidden_prime, hidden, blank_indices)
-                    elif len(blank_indices) > 0 and hidden is None:
-                        hidden_prime = model.decoding.decoding.decoder.batch_copy_states(hidden_prime, None, blank_indices, value=0.0)
-                    k[blank_indices] = last_label[blank_indices, 0]
-                    last_label = k.clone().view(-1, 1)
-                    hidden = hidden_prime
-                    for kidx, ki in enumerate(k):
-                        if blank_mask[kidx] == 0:
-                            hypotheses[kidx].y_sequence.append(ki)
-                            hypotheses[kidx].timestep.append(time_idx)
-                            hypotheses[kidx].score += float(v[kidx])
-                    symbols_added += 1
-
-            gt_f = gt_x.narrow(dim=1, start=time_idx, length=1)  # [B, 1, D]
-
-            gt_not_blank = True
-            gt_symbols_added = 0
-
-            gt_blank_mask.mul_(False)
-            gt_blank_mask = time_idx >= out_len
-
-            while gt_not_blank and (model.decoding.decoding.max_symbols is None or gt_symbols_added < model.decoding.decoding.max_symbols):
-                if time_idx == 0 and gt_symbols_added == 0 and gt_hidden is None:
-                    gt_in_label = model.decoding.decoding._SOS
-                else:
-                    gt_in_label = gt_last_label
-                if isinstance(gt_in_label, torch.Tensor) and gt_in_label.dtype != torch.long:
-                    gt_in_label = gt_in_label.long()
-                    gt_g, gt_hidden_prime = model.decoding.decoding.decoder.predict(None, gt_hidden, False, batchsize)
-                else:
-                    if gt_in_label == model.decoding.decoding._SOS:
-                        gt_g, gt_hidden_prime = model.decoding.decoding.decoder.predict(None, gt_hidden, False, batchsize)
-                    else:
-                        gt_in_label = label_collate([[gt_in_label.cpu()]])
-                        gt_g, gt_hidden_prime = model.decoding.decoding.decoder.predict(gt_in_label, gt_hidden, False, batchsize)
-
-                gt_logp = model.decoding.decoding.joint.joint(gt_f, gt_g)
-                if not gt_logp.is_cuda:
-                    gt_logp = gt_logp.log_softmax(dim=len(gt_logp.shape) - 1)
-                gt_logp = gt_logp[:, 0, 0, :]
-
-                if gt_logp.dtype != torch.float32:
-                    gt_logp = gt_logp.float()
-
-                gt_v, gt_k = gt_logp.max(1)
-
-                gt_k_is_blank = gt_k == model.decoding.decoding._blank_index
-
-                gt_blank_mask.bitwise_or_(gt_k_is_blank)
-
-                if model.decoding.decoding.preserve_alignments:
-                    gt_logp_vals = gt_logp.to('cpu')
-                    gt_logp_ids = gt_logp_vals.max(1)[1]
-                    for batch_idx in range(batchsize):
-                        if time_idx < out_len[batch_idx]:
-                            gt_hypotheses[batch_idx].alignments[-1].append(
-                                (gt_logp_vals[batch_idx], gt_logp_ids[batch_idx])
-                            )
-
-                if gt_blank_mask.all():
-                    gt_not_blank = False
-                    if model.decoding.decoding.preserve_alignments:
-                        for batch_idx in range(batchsize):
-                            if len(gt_hypotheses[batch_idx].alignments[-1]) > 0:
-                                gt_hypotheses[batch_idx].alignments.append([])  # blank buffer for next timestep
-                else:
-                    blank_indices = (gt_blank_mask == 1).nonzero(as_tuple=False)
-                    if gt_hidden is not None:
-                        gt_hidden_prime = model.decoding.decoding.decoder.batch_copy_states(gt_hidden_prime, gt_hidden, blank_indices)
-                    elif len(blank_indices) > 0 and gt_hidden is None:
-                        gt_hidden_prime = model.decoding.decoding.decoder.batch_copy_states(gt_hidden_prime, None, blank_indices, value=0.0)
-                    gt_k[blank_indices] = gt_last_label[blank_indices, 0]
-                    gt_last_label = gt_k.clone().view(-1, 1)
-                    gt_hidden = gt_hidden_prime
-                    for kidx, ki in enumerate(gt_k):
-                        if gt_blank_mask[kidx] == 0:
-                            gt_hypotheses[kidx].y_sequence.append(ki)
-                            gt_hypotheses[kidx].timestep.append(time_idx)
-                            gt_hypotheses[kidx].score += float(gt_v[kidx])
-                    gt_symbols_added += 1
-
-    return log_probs_lst
+    pseudo_labels = [torch.tensor(hyp.token_list) for hyp in model.sort_nbest(kept_hyps)]
+    aux_label = [torch.tensor([model.blank for _ in range(int(encoded_lengths))])]
+    pseudo_labels = pad_sequence(pseudo_labels + aux_label, batch_first=True, padding_value=model.blank)[:model.beam_size]
+    return [pseudo_label for pseudo_label in pseudo_labels]
