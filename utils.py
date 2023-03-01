@@ -9,6 +9,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from apex import amp
+from torch.cuda.amp import GradScaler
+from torch.cuda.amp import autocast
 
 from transformers import Wav2Vec2ForCTC
 from speechbrain.pretrained import EncoderDecoderASR
@@ -46,21 +49,25 @@ def get_model(args):
             model = model.cuda()
     elif args.asr in ["speechbrain/asr-crdnn-rnnlm-librispeech", "speechbrain/asr-crdnn-transformerlm-librispeech", "speechbrain/asr-transformer-transformerlm-librispeech", "speechbrain/asr-conformersmall-transformerlm-librispeech"]: # attention-based models
         model = EncoderDecoderASR.from_hparams(args.asr, run_opts={"device": args.device}).requires_grad_(True).eval()
+    elif args.asr in ["pretrained_models/stt_en_conformer_ctc_small.nemo", "pretrained_models/stt_en_conformer_ctc_small_ls.nemo"]:
+        model = nemo_asr.models.EncDecCTCModelBPE.restore_from(args.asr).to(args.device).requires_grad_(True).eval()
     elif args.asr in ["pretrained_models/stt_en_conformer_transducer_small.nemo", "pretrained_models/stt_en_conformer_transducer_large.nemo"]: # transducers
         model = nemo_asr.models.EncDecRNNTBPEModel.restore_from(args.asr).to(args.device).requires_grad_(True).eval()
     return model
 
 
-def collect_params(model, train_params, bias_only):
+def collect_params(model, train_params):
     if isinstance(model, Wav2Vec2ForCTC):
-        return collect_params_ctc(model, train_params, bias_only)
+        return collect_params_ctc(model, train_params)
     elif isinstance(model, EncoderDecoderASR):
         return collect_params_attn(model, train_params)
+    elif isinstance(model, nemo_asr.models.EncDecCTCModelBPE):
+        return collect_params_conf(model, train_params)
     elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
         return collect_params_trans(model, train_params)
 
 
-def collect_params_ctc(model, train_params, bias_only):
+def collect_params_ctc(model, train_params):
     """Collect the affine scale + shift parameters from batch norms.
 
     Walk the model's modules and collect all batch normalization parameters.
@@ -70,11 +77,7 @@ def collect_params_ctc(model, train_params, bias_only):
     """
     params = []
     names = []
-    trainable = []
-    if bias_only:
-        trainable = ['bias']
-    else: 
-        trainable = ['weight', 'bias']
+    trainable = ['weight', 'bias']
 
     for nm, m in model.named_modules():
         if "all" in train_params:
@@ -114,12 +117,9 @@ def collect_params_attn(model, train_params):
             if 'enc' in train_params and 'encoder' in str(nm):
                 collect = True
             if 'dec' in train_params and 'decoder' in str(nm):
-                if 'emb' in f"{nm}.{np}":
-                    print(f"str(np): {str(np)}")
-                    continue
                 collect = True
             # TODO: implement this
-            if 'linear' in train_params and 'fc' in str(np):
+            if 'linear' in train_params and 'fc' in f"{nm}.{np}":
                 collect = True
             if 'LN' in train_params and isinstance(m, nn.LayerNorm):
                 collect = True
@@ -129,8 +129,12 @@ def collect_params_attn(model, train_params):
                 params.append(p)
                 names.append(f"{nm}.{np}")
 
-    print(f"names: {names}")
     return params, names
+
+
+# TODO: implement this
+def collect_params_conf(model, train_params):
+    return collect_params_trans(model, train_params)
 
 
 def collect_params_trans(model, train_params):
@@ -166,12 +170,10 @@ def freeze_norm_stats(model):
 
 
 def set_rnn_to_train(model):
-    if isinstance(model, EncoderDecoderASR) or isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
-        for m in model.modules():
-            if isinstance(m, torch.nn.modules.rnn.RNNBase):
-                m.train()
-                m.dropout = 0
-                # m.dropout = 0.001
+    for m in model.modules():
+        if isinstance(m, torch.nn.modules.rnn.RNNBase):
+            m.train()
+            m.dropout = 0
     return model
 
 
@@ -183,7 +185,7 @@ def get_optimizer(args, params, opt_name='AdamW', lr=1e-4, beta=0.9, weight_deca
         optimizer = opt(params, lr=lr, weight_decay=weight_decay)
     
     if scheduler is not None: 
-        return optimizer, eval(scheduler)(optimizer, T_max=args.t_max, eta_min=args.eta_min)
+        return optimizer, eval(scheduler)(optimizer, T_max=args.t_max, eta_min=args.lr_min)
     return optimizer, None
 
 
@@ -214,6 +216,8 @@ def get_blank_index(args, model, processor):
         blank_index = 0
     elif isinstance(model, EncoderDecoderASR):
         blank_index = model.mods.decoder.blank_index
+    elif isinstance(model, nemo_asr.models.EncDecCTCModelBPE):
+        blank_index = 128
     elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
         blank_index = processor.blank
     return blank_index
@@ -281,22 +285,3 @@ def log_softmax(x, axis):
         out: np.ndarray = np.log(s)
     out = tmp - out
     return out
-
-
-def pl_loss(outputs, vocab, processor):
-    # TODO: change blank index from zero to others
-    # ctc_loss = nn.CTCLoss(blank=0, zero_infinity=False)
-    # predicted_ids = torch.argmax(outputs, dim=-1)
-    # transcription = processor.batch_decode(predicted_ids)[0]
-    # target = []
-    # for s in transcription:
-    #     if s == ' ':
-    #         s = '|'
-    #     target.append(vocab[s])
-
-    # logp = outputs.log_softmax(1).transpose(1, 0) # L,N,D
-    # input_len = logp.shape[0]
-    # tgt_len = len(target)
-    # loss = ctc_loss(logp, torch.tensor(target).int(), torch.tensor([input_len]), torch.tensor([tgt_len]))
-    # return loss
-    raise NotImplementedError
