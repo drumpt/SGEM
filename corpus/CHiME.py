@@ -19,7 +19,7 @@ def read_text(tpath, file):
 
 
 class CHiMEDataset(Dataset):
-    def __init__(self, split, bucket_size, path="/home/daniel094144/data/CHiME3", enhance=False, ascending=False):
+    def __init__(self, bucket_size, path="/home/daniel094144/data/CHiME3", enhance=False, ascending=False):
         # Setup
         self.path = path
         self.bucket_size = bucket_size
