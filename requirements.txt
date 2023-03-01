@@ -10,11 +10,8 @@ ptyprocess
 pickleshare
 backcall
 ipython
-<<<<<<< HEAD
-=======
 librosa==0.9.2
 soundfile
->>>>>>> 7e6662726d826fce28b0f9f6a8323983a60e3227
 
 hydra-core==1.2.0
 hydra-colorlog==1.2.0
