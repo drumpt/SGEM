@@ -41,7 +41,7 @@ def collect_audio_batch(batch, extra_noise=0., maxLen=600000):
     return torch.tensor(audio_len), audio_feat, text, file
 
 
-def create_dataset(split, name, path, batch_size=1, noise_type=None):
+def create_dataset(name, path, batch_size=1, noise_type=None):
     ''' Interface for creating all kinds of dataset'''
 
     # Recognize corpus
@@ -61,18 +61,18 @@ def create_dataset(split, name, path, batch_size=1, noise_type=None):
 
     loader_bs = batch_size
     if name.lower() == "librispeech":
-        dataset = Dataset(split, batch_size, path, noise_type=noise_type)
+        dataset = Dataset(batch_size, path, noise_type=noise_type)
     else:
-        dataset = Dataset(split, batch_size, path)
+        dataset = Dataset(batch_size, path)
 
     print(f'[INFO]    There are {len(dataset)} samples.')
 
     return dataset, loader_bs
 
 
-def load_dataset(split=None, name='librispeech', path=None, batch_size=1, extra_noise=0., noise_type=None, num_workers=4):
+def load_dataset(name='librispeech', path=None, batch_size=1, extra_noise=0., noise_type=None, num_workers=4):
     ''' Prepare dataloader for training/validation'''
-    dataset, loader_bs = create_dataset(split, name, path, batch_size, noise_type=noise_type)
+    dataset, loader_bs = create_dataset(name, path, batch_size, noise_type=noise_type)
     if name=="librispeech":
         collate_fn = partial(collect_audio_batch, extra_noise=extra_noise)
     else:

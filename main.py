@@ -3,6 +3,7 @@ import os
 import gc
 import hydra
 from omegaconf import OmegaConf
+import pickle
 
 import torch
 import torch.nn as nn
@@ -11,14 +12,14 @@ from torch.nn.utils.rnn import pad_sequence
 torch.backends.cudnn.enabled = True
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
-# from apex import amp
-# from torch.cuda.amp import GradScaler
-# from torch.cuda.amp import autocast
 
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor, Wav2Vec2ProcessorWithLM
 from speechbrain.pretrained import EncoderDecoderASR
 import nemo.collections.asr as nemo_asr
 from nemo.collections.asr.parts.submodules.rnnt_beam_decoding import BeamRNNTInfer
+from pyctcdecode import BeamSearchDecoderCTC
+from pyctcdecode.alphabet import Alphabet
+from pyctcdecode.language_model import LanguageModel
 from jiwer import wer
 
 from data import *
@@ -28,11 +29,17 @@ from utils import *
 
 def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
     optimizer.zero_grad()
-    blank_index = get_blank_index(args, model, decoder_processor)
+    blank_index = get_blank_index(args, model, processor)
 
     for i, wav in enumerate(wavs):
         wav = wav[:lens[i]].unsqueeze(0)
-        outputs, pseudo_labels = get_logits_and_pseudo_labels(args, model, decoder_processor, wav, torch.FloatTensor([lens[i]]).to(wav.device))
+
+        current = time.time()
+
+        outputs, pseudo_labels = get_logits_and_pseudo_labels(args, model, processor, wav, torch.FloatTensor([lens[i]]).to(wav.device))
+
+        print(f"forward time: {time.time() - current}")
+
         if "original" in args.method or "em_uncertainty" in args.method or "em_sparse" in args.method:
             predicted_ids = torch.argmax(outputs, dim=-1)
             non_blank = torch.where(predicted_ids != blank_index, 1, 0).bool()
@@ -83,11 +90,6 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             (nll_loss / len(wavs)).backward()
 
             del wav, log_prob_tensor, max_log_probs, sum_log_probs, nll_loss
-        if 'ctc' in args.method:
-            # TODO: implement ctc loss
-            vocab = CTC_VOCAB
-            ctc_loss = pl_loss(outputs, vocab, processor)
-            (ctc_loss / len(wavs)).backward()
         if 'beam_search_max' in args.method or 'beam_search_all' in args.method or 'beam_search_negative_sampling' in args.method:
             criterion = nn.CrossEntropyLoss(ignore_index=blank_index) if args.not_blank else nn.CrossEntropyLoss()
             if 'beam_search_max' in args.method:
@@ -198,23 +200,12 @@ def main(args):
     logger = get_logger(args)
     logger.info(OmegaConf.to_yaml(args))
 
-    dataset = load_dataset(args.split, args.dataset_name, args.dataset_dir, args.batch_size, args.extra_noise, args.noise_type)
+    dataset = load_dataset(args.dataset_name, args.dataset_dir, args.batch_size, args.extra_noise, args.noise_type)
     gt_texts, ori_transcriptions, transcriptions_1, transcriptions_3, transcriptions_5, transcriptions_10, transcriptions_20, transcriptions_40 = [], [], [], [], [], [], [], []
 
     model = get_model(args)
-
-    def get_n_params(model):
-        pp=0
-        for p in list(model.parameters()):
-            nn=1
-            for s in list(p.size()):
-                nn = nn*s
-            pp += nn
-        return pp
-    print(f"num_parameters: {get_n_params(model)}")
-
     original_model = get_model(args)
-    params, _ = collect_params(model, args.train_params, args.bias_only)
+    params, _ = collect_params(model, args.train_params)
     optimizer, scheduler = get_optimizer(args, params, opt_name=args.optimizer, lr=args.lr, scheduler=args.scheduler)
     # if args.use_amp:
     #     torch.set_default_dtype(torch.float16)
@@ -223,11 +214,16 @@ def main(args):
     #     scaler = GradScaler()
     processor = Wav2Vec2Processor.from_pretrained(args.asr, sampling_rate=args.sample_rate, return_attention_mask=True) if isinstance(model, Wav2Vec2ForCTC) else None
 
-    global decoder_processor
     if isinstance(model, Wav2Vec2ForCTC): # ctc
         decoder_processor = Wav2Vec2ProcessorWithLM.from_pretrained("patrickvonplaten/wav2vec2-base-100h-with-lm")
     elif isinstance(model, EncoderDecoderASR):
         decoder_processor = None
+    elif isinstance(model, nemo_asr.models.EncDecCTCModelBPE):
+        decoder_processor = BeamSearchDecoderCTC(
+            # alphabet=Alphabet(labels=model.decoder.vocabulary+[""], is_bpe=True),
+            alphabet=Alphabet(labels=model.decoder.vocabulary+[""], is_bpe=True),
+            language_model=LanguageModel.load_from_dir("pretrained_models/wav2vec2-base-100h-with-lm/snapshots/0612413f4d1532f2e50c039b2f014722ea59db4e/language_model")
+        )
     elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
         decoder_processor = BeamRNNTInfer(
             model.decoding.decoding.decoder.to(args.device),
@@ -266,7 +262,7 @@ def main(args):
 
         for step_idx in range(1, steps + 1):
             model = set_rnn_to_train(model)
-            forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens)
+            forward_and_adapt(args, model, decoder_processor, optimizer, scheduler, wavs, lens)
 
             if step_idx in [1, 3, 5, 10, 20, 40]:
                 transcription = transcribe_batch(args, model, processor, wavs, lens)
@@ -286,10 +282,14 @@ def main(args):
     logger.info(f"original WER: {wer(gt_texts, ori_transcriptions)}")
     for step_idx in [1, 3, 5, 10, 20, 40]:
         if step_idx > steps:
-            continue
+            break
         transcription_list = eval(f"transcriptions_{step_idx}")
         logger.info(f"TTA-{step_idx}: {wer(gt_texts, transcription_list)}")
 
+    transcription_dict = {"gt_texts": gt_texts, "ori_transcriptions": ori_transcriptions, "transcriptions_1": transcriptions_1, "transcriptions_3": transcriptions_3, "transcriptions_5": transcriptions_5, "transcriptions_10": transcriptions_10, "transcriptions_20": transcriptions_20, "transcriptions_40": transcriptions_40}
+    dirname, filename = os.path.dirname(logger.handlers[0].baseFilename), os.path.basename(logger.handlers[0].baseFilename).replace("log", "transcriptions").replace("txt", "pickle")
+    with open(os.path.join(dirname, filename), 'wb') as f:
+        pickle.dump(transcription_dict, f)
 
 
 if __name__ == '__main__':
