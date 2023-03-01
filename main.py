@@ -33,13 +33,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
 
     for i, wav in enumerate(wavs):
         wav = wav[:lens[i]].unsqueeze(0)
-
-        current = time.time()
-
         outputs, pseudo_labels = get_logits_and_pseudo_labels(args, model, processor, wav, torch.FloatTensor([lens[i]]).to(wav.device))
-
-        print(f"forward time: {time.time() - current}")
-
         if "original" in args.method or "em_uncertainty" in args.method or "em_sparse" in args.method:
             predicted_ids = torch.argmax(outputs, dim=-1)
             non_blank = torch.where(predicted_ids != blank_index, 1, 0).bool()
@@ -69,27 +63,6 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             if 1 - args.em_coef > 0:
                 c_loss = mcc_loss(outputs / args.temp, class_num=outputs.shape[-1], reweight=True)
                 ((1 - args.em_coef) * c_loss / (len(wavs))).backward(retain_graph=True)
-        if "greedy_pseudo_labeling" in args.method:
-            log_prob_tensor = forward_batch(args, model, wav, torch.FloatTensor([lens[i]]).to(wav.device))
-            max_log_probs, _ = torch.max(log_prob_tensor, dim=-1, keepdim=False)
-
-            if args.certain_only:
-                probs = torch.softmax(log_prob_tensor, dim=-1)
-                confidence, _ = torch.max(probs, dim=-1, keepdim=True)
-                selected_tokens = torch.where(confidence > args.prob_threshold, 1, 0).bool()
-                max_log_probs = selected_tokens * max_log_probs
-
-            if args.not_blank:
-                predicted_ids = torch.argmax(log_prob_tensor, dim=-1)
-                non_blank = torch.where(predicted_ids != blank_index, 1, 0).bool()
-                max_log_probs = non_blank * max_log_probs
-
-            sum_log_probs = torch.sum(max_log_probs, dim=-1)
-
-            nll_loss = - sum_log_probs.mean()
-            (nll_loss / len(wavs)).backward()
-
-            del wav, log_prob_tensor, max_log_probs, sum_log_probs, nll_loss
         if 'beam_search_max' in args.method or 'beam_search_all' in args.method or 'beam_search_negative_sampling' in args.method:
             criterion = nn.CrossEntropyLoss(ignore_index=blank_index) if args.not_blank else nn.CrossEntropyLoss()
             if 'beam_search_max' in args.method:
@@ -167,13 +140,6 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
                     negative_loss += torch.mean(-torch.log(1 - torch.sum(negative_mask * torch.softmax(negative_outputs / args.temp, dim=-1), dim=-1)))
                 if torch.is_tensor(negative_loss):
                     (args.ns_coef * negative_loss / len(wavs)).backward(retain_graph=True)
-        if 'diversity_maximization' in args.method:
-            predicted_ids = torch.argmax(outputs, dim=-1)
-            non_blank = torch.where(predicted_ids != blank_index, 1, 0).bool()
-            probs = torch.softmax(outputs[non_blank] / args.temp, dim=-1)
-            mean_prob = torch.mean(probs, dim=0)
-            loss = torch.sum(mean_prob * torch.log(mean_prob))
-            (args.dm_coef * loss / len(wavs)).backward(retain_graph=True)
         if 'renyi_em' in args.method:
             predicted_ids = torch.argmax(outputs, dim=-1)
             non_blank = torch.where(predicted_ids != blank_index, 1, 0).bool()

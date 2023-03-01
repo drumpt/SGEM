@@ -1,6 +1,6 @@
 ### model
-asr: facebook/wav2vec2-base-960h
-# asr: pretrained_models/stt_en_conformer_ctc_small_ls.nemo
+# asr: facebook/wav2vec2-base-960h
+asr: pretrained_models/stt_en_conformer_ctc_small_ls.nemo
 # asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 
 ### dataset
@@ -25,14 +25,14 @@ device: cuda
 use_amp: true
 
 ### logging
-log_dir: exps/test
+log_dir: exps/tasper_conformer
 
 ### seed for reproductivity
 seed: null
 
 ### optimizer & train hyparameters & learning rate scheduler
 optimizer: AdamW
-train_params: [feature] # currently supported: all, feature, LN, linear(linear probing), enc, dec
+train_params: [all] # currently supported: all, feature, LN, linear(linear probing), enc, dec
 steps: 10
 episodic: true # load pretrained model again for every batch
 

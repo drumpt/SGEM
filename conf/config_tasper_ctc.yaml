@@ -25,7 +25,7 @@ device: cuda
 use_amp: true
 
 ### logging
-log_dir: exps/test
+log_dir: exps/tasper_ctc
 
 ### seed for reproductivity
 seed: null
