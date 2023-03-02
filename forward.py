@@ -8,10 +8,6 @@ import copy
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
-from torch.cuda import amp
-# from apex import amp
-# from torch.cuda.amp import GradScaler
-# from torch.cuda.amp import autocast
 
 from transformers import Wav2Vec2ForCTC
 from speechbrain.pretrained import EncoderDecoderASR
@@ -54,7 +50,6 @@ class Hypothesis: # for transducers
     tokens: Optional[Union[List[int], torch.Tensor]] = None
     last_token: Optional[torch.Tensor] = None
     token_list: List = field(default_factory=list)
-    # logit_list: List[torch.Tensor] = field(default_factory=list)
 
 
 @torch.no_grad()
