@@ -44,7 +44,7 @@ def get_model(args):
             model = model.cuda()
     elif args.asr in ["speechbrain/asr-crdnn-rnnlm-librispeech", "speechbrain/asr-crdnn-transformerlm-librispeech", "speechbrain/asr-transformer-transformerlm-librispeech", "speechbrain/asr-conformersmall-transformerlm-librispeech"]: # attention-based models
         model = EncoderDecoderASR.from_hparams(args.asr, run_opts={"device": args.device}).requires_grad_(True).eval()
-    elif args.asr in ["pretrained_models/stt_en_conformer_ctc_small.nemo", "pretrained_models/stt_en_conformer_ctc_small_ls.nemo"]:
+    elif args.asr in ["pretrained_models/stt_en_conformer_ctc_small.nemo", "pretrained_models/stt_en_conformer_ctc_small_ls.nemo"]: # conformers
         model = nemo_asr.models.EncDecCTCModelBPE.restore_from(args.asr).to(args.device).requires_grad_(True).eval()
     elif args.asr in ["pretrained_models/stt_en_conformer_transducer_small.nemo", "pretrained_models/stt_en_conformer_transducer_large.nemo"]: # transducers
         model = nemo_asr.models.EncDecRNNTBPEModel.restore_from(args.asr).to(args.device).requires_grad_(True).eval()
@@ -97,6 +97,19 @@ def collect_params_ctc(model, train_params):
                         if not f"{nm}.{np}" in names:
                             params.append(p)
                             names.append(f"{nm}.{np}")
+
+    # def get_n_params(model):
+    #     pp=0
+    #     for p in list(model.parameters()):
+    #         nn=1
+    #         for s in list(p.size()):
+    #             nn = nn*s
+    #         pp += nn
+    #     return pp
+    # total_params = get_n_params(model)
+    # fe_params = get_n_params(model.feature_extractor)
+    # print(f"total_params: {total_params}")
+    # print(f"fe_params: {fe_params}")
     return params, names
 
 
