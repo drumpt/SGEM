@@ -12,10 +12,9 @@ backcall
 ipython
 librosa==0.9.2
 soundfile
-
+tshelve
 hydra-core==1.2.0
 hydra-colorlog==1.2.0
-tshelve
 
 numpy
 pandas
@@ -27,10 +26,6 @@ nemo-toolkit
 pytorch-lightning==1.6.5
 pyctcdecode
 https://github.com/kpu/kenlm/archive/master.zip
-
-audio_augmentations
-git+https://github.com/facebookresearch/WavAugment
-info-nce-pytorch
 jiwer
 
 matplotlib
