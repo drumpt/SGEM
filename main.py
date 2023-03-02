@@ -200,9 +200,7 @@ def main(args):
         original_model_state, original_optimizer_state, original_scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
     for batch_idx, batch in enumerate(dataset):
-        # TODO: remove(just for experiment)
-        if args.dataset_name == "commonvoice" and batch_idx * args.batch_size >= 1000:
-            break
+        lens, wavs, texts, _ = batch
 
         if isinstance(model, Wav2Vec2ForCTC):
             wavs = processor(wavs, sampling_rate=args.sample_rate, return_tensors="pt", padding="longest").input_values.to(args.device)
@@ -239,13 +237,6 @@ def main(args):
         gc.collect()
         torch.cuda.empty_cache()
         logger.info("\n")
-
-    logger.info("gt texts\n")
-    logger.info("\n".join(list(gt_texts)))
-    logger.info("\n\n\n")
-
-    logger.info("ori_transcriptions\n")    
-    logger.info("\n".join(list(ori_transcriptions)))
 
     logger.info(OmegaConf.to_yaml(args))
     logger.info(f"number of data : {len(dataset)}")
