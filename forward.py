@@ -8,10 +8,6 @@ import copy
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
-from torch.cuda import amp
-# from apex import amp
-# from torch.cuda.amp import GradScaler
-# from torch.cuda.amp import autocast
 
 from transformers import Wav2Vec2ForCTC
 from speechbrain.pretrained import EncoderDecoderASR
@@ -1281,3 +1277,4 @@ def decode_trans(model, h, encoded_lengths):
     aux_label = [torch.tensor([model.blank for _ in range(int(encoded_lengths))])]
     pseudo_labels = pad_sequence(pseudo_labels + aux_label, batch_first=True, padding_value=model.blank)[:model.beam_size]
     return [pseudo_label for pseudo_label in pseudo_labels]
+    
