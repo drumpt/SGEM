@@ -63,17 +63,7 @@ def collect_params(model, train_params):
 
 
 def collect_params_ctc(model, train_params):
-    """Collect the affine scale + shift parameters from batch norms.
-
-    Walk the model's modules and collect all batch normalization parameters.
-    Return the parameters and their names.
-
-    Note: other choices of parameterization are possible!
-    """
-    params = []
-    names = []
-    trainable = ['weight', 'bias']
-
+    params, names = [], []
     for nm, m in model.named_modules():
         if "all" in train_params:
             for np, p in m.named_parameters():
@@ -92,31 +82,16 @@ def collect_params_ctc(model, train_params):
         if "LN" in train_params:
             if isinstance(m, nn.LayerNorm):
                 for np, p in m.named_parameters():
-                    if np in trainable:  
+                    if np in ['weight', 'bias']:  
                         p.requires_grad = True
                         if not f"{nm}.{np}" in names:
                             params.append(p)
                             names.append(f"{nm}.{np}")
-
-    # def get_n_params(model):
-    #     pp=0
-    #     for p in list(model.parameters()):
-    #         nn=1
-    #         for s in list(p.size()):
-    #             nn = nn*s
-    #         pp += nn
-    #     return pp
-    # total_params = get_n_params(model)
-    # fe_params = get_n_params(model.feature_extractor)
-    # print(f"total_params: {total_params}")
-    # print(f"fe_params: {fe_params}")
     return params, names
 
 
 def collect_params_attn(model, train_params):
-    params = []
-    names = []
-
+    params, names = [], []
     for nm, m in model.named_modules():
         for np, p in m.named_parameters():
             collect = False
@@ -126,9 +101,6 @@ def collect_params_attn(model, train_params):
                 collect = True
             if 'dec' in train_params and 'decoder' in str(nm):
                 collect = True
-            # TODO: implement this
-            if 'linear' in train_params and 'fc' in f"{nm}.{np}":
-                collect = True
             if 'LN' in train_params and isinstance(m, nn.LayerNorm):
                 collect = True
 
@@ -136,38 +108,54 @@ def collect_params_attn(model, train_params):
                 p.requires_grad = True
                 params.append(p)
                 names.append(f"{nm}.{np}")
-
     return params, names
 
 
-# TODO: implement this
 def collect_params_conf(model, train_params):
-    return collect_params_trans(model, train_params)
+    params, names = [], []
+    for nm, m in model.named_modules():
+        for np, p in m.named_parameters():
+            collect = False 
+            if "all" in train_params:
+                collect = True
+            if 'LN' in train_params and isinstance(m, nn.LayerNorm):
+                collect = True
+            if 'BN' in train_params and isinstance(m, nn.BatchNorm1d):
+                collect = True
+            if 'enc' in train_params and 'encoder' in nm:
+                collect = True
+            if 'dec' in train_params and 'decoder' in nm:
+                collect = True
+
+            if collect:
+                p.requires_grad = True
+                params.append(p)
+                names.append(f"{nm}.{np}")
+    return params, names
 
 
 def collect_params_trans(model, train_params):
-    params = []
-    names = []
+    params, names = [], []
+    for nm, m in model.named_modules():
+        for np, p in m.named_parameters():
+            collect = False 
+            if "all" in train_params:
+                collect = True
+            if 'LN' in train_params and isinstance(m, nn.LayerNorm):
+                collect = True
+            if 'BN' in train_params and isinstance(m, nn.BatchNorm1d):
+                collect = True
+            if 'enc' in train_params and 'encoder' in nm:
+                collect = True
+            if 'dec' in train_params and 'decoder' in nm:
+                collect = True
+            if 'joint' in train_params and 'joint' in nm:
+                collect = True
 
-    for np, p in model.named_parameters():
-        collect = False 
-        if "all" in train_params:
-            collect = True
-        if 'enc' in train_params and 'enc' in str(np):
-            collect = True
-        if 'dec' in train_params and 'dec' in str(np):
-            collect = True
-        if 'joint' in train_params and 'joint' in str(np):
-            collect = True
-        if 'linear' in train_params and 'joint_net' in str(np):
-            collect = True
-        if 'LN' in train_params and 'norm' in str(np):
-            collect = True
-
-        if collect:
-            p.requires_grad = True
-            params.append(p)
-            names.append(str(np))
+            if collect:
+                p.requires_grad = True
+                params.append(p)
+                names.append(f"{nm}.{np}")
     return params, names
 
 

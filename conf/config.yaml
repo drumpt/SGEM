@@ -32,7 +32,7 @@ seed: null
 
 ### optimizer & train hyparameters & learning rate scheduler
 optimizer: AdamW
-train_params: [feature] # currently supported: all, feature, LN, linear(linear probing), enc, dec
+train_params: [feature] # currently supported: all, feature, enc, dec, joint, LN, BN, ...
 steps: 10
 episodic: true # load pretrained model again for every batch
 
