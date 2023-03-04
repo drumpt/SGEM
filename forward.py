@@ -50,7 +50,6 @@ class Hypothesis: # for transducers
     tokens: Optional[Union[List[int], torch.Tensor]] = None
     last_token: Optional[torch.Tensor] = None
     token_list: List = field(default_factory=list)
-    # logit_list: List[torch.Tensor] = field(default_factory=list)
 
 
 @torch.no_grad()

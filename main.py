@@ -175,13 +175,12 @@ def main(args):
     optimizer, scheduler = get_optimizer(args, params, opt_name=args.optimizer, lr=args.lr, scheduler=args.scheduler)
     processor = Wav2Vec2Processor.from_pretrained(args.asr, sampling_rate=args.sample_rate, return_attention_mask=True) if isinstance(model, Wav2Vec2ForCTC) else None
 
-    if isinstance(model, Wav2Vec2ForCTC): # ctc
+    if isinstance(model, Wav2Vec2ForCTC):
         decoder_processor = Wav2Vec2ProcessorWithLM.from_pretrained("patrickvonplaten/wav2vec2-base-100h-with-lm")
     elif isinstance(model, EncoderDecoderASR):
         decoder_processor = None
     elif isinstance(model, nemo_asr.models.EncDecCTCModelBPE):
         decoder_processor = BeamSearchDecoderCTC(
-            # alphabet=Alphabet(labels=model.decoder.vocabulary+[""], is_bpe=True),
             alphabet=Alphabet(labels=model.decoder.vocabulary+[""], is_bpe=True),
             language_model=LanguageModel.load_from_dir("pretrained_models/wav2vec2-base-100h-with-lm/snapshots/0612413f4d1532f2e50c039b2f014722ea59db4e/language_model")
         )
@@ -200,8 +199,10 @@ def main(args):
         original_model_state, original_optimizer_state, original_scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
     for batch_idx, batch in enumerate(dataset):
-        lens, wavs, texts, _ = batch
+        if args.dataset_name == "commonvoice" and batch_idx >= 1000:
+            break
 
+        lens, wavs, texts, _ = batch
         if isinstance(model, Wav2Vec2ForCTC):
             wavs = processor(wavs, sampling_rate=args.sample_rate, return_tensors="pt", padding="longest").input_values.to(args.device)
         else:
