@@ -32,14 +32,14 @@ seed: null
 
 ### optimizer & train hyparameters & learning rate scheduler
 optimizer: AdamW
-train_params: [all] # currently supported: all, feature, LN, linear(linear probing), enc, dec
+train_params: [enc] # currently supported: all, feature, LN, linear(linear probing), enc, dec
 steps: 10
 episodic: true # load pretrained model again for every batch
 
-lr: 2e-5
+lr: 5e-5
 scheduler: null # null or CosineAnnealingLR
 t_max: 10
-lr_min: 2e-5
+lr_min: 5e-5
 
 ##################################################################
 ### methods & other hyperparameters
