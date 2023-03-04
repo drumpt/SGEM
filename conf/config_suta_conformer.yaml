@@ -36,10 +36,10 @@ train_params: [enc] # currently supported: all, feature, LN, linear(linear probi
 steps: 10
 episodic: true # load pretrained model again for every batch
 
-lr: 5e-5
+lr: 1e-5
 scheduler: null # null or CosineAnnealingLR
 t_max: 10
-lr_min: 5e-5
+lr_min: 1e-5
 
 ##################################################################
 ### methods & other hyperparameters
