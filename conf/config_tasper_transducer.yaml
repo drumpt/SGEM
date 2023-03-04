@@ -59,11 +59,11 @@ not_blank: true
 certain_only: true
 
 ### renyi entropy minimization
-renyi_entropy_alpha: 1.5 # 1, 2, ..., inf
+renyi_entropy_alpha: 1.25 # 1, 2, ..., inf
 
 # negative sampling
 negative_sampling_method: ns3l # random, beam_candidate, ns3l
-ns_coef: 1
+ns_coef: 0.5
 ns_threshold: 0.04
 
 # thresholding
