@@ -1,5 +1,5 @@
 import torch
-torch.manual_seed(0)
+torch.manual_seed(0) # TODO: need to be removed
 import torchaudio
 from functools import partial
 from torch.utils.data import DataLoader
@@ -54,7 +54,8 @@ def create_dataset(name, path, batch_size=1, noise_type=None):
         from corpus.commonvoice import CVDataset as Dataset
     elif name.lower() == "valentini":
         from corpus.valentini import ValDataset as Dataset
-
+    elif name.lower() =="l2arctic":
+        from corpus.l2arctic import L2ArcticDataset as Dataset
     else:
         raise NotImplementedError
 
