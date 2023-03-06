@@ -14,6 +14,8 @@ dataset_dir: /home/server17/hdd/changhun_workspace/CHiME3
 # dataset_dir: /home/server17/hdd/changhun_workspace/cv-corpus-5.1-2020-06-22/en
 # dataset_name: valentini
 # dataset_dir: /home/server17/hdd/changhun_workspace/Valentini
+# dataset_name: l2arctic
+# dataset_dir: /home/server17/hdd/changhun_workspace/L2Arctic/YBAA
 
 extra_noise: 0.00
 noise_type: null # currently supported: null, AirConditioner_6, AirportAnnouncements_2, Babble_4, CopyMachine_2, Munching_3, Neighbor_6, ShuttingDoor_6, Typing_2
