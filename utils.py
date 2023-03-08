@@ -227,7 +227,7 @@ def renyi_entropy(x, alpha, dim=-1):
     # x: (B, L, D)
     if alpha == 1:
         return torch.mean(softmax_entropy(x, dim))
-    if alpha == 'inf':
+    if alpha == 'inf' or alpha == float('inf'):
         entropy, _ = torch.max(x, dim)
         return -torch.mean(torch.log(entropy))
     entropy = torch.log(torch.pow(x.softmax(dim), alpha).sum(dim)) # entropy: B, L
