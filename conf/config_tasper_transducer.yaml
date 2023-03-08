@@ -35,6 +35,7 @@ optimizer: AdamW
 train_params: [enc] # currently supported: all, feature, LN, linear(linear probing), enc, dec
 steps: 10
 episodic: true # load pretrained model again for every batch
+print_all_steps: false
 
 lr: 4e-6
 scheduler: CosineAnnealingLR # null or CosineAnnealingLR
@@ -46,7 +47,7 @@ lr_min: 2e-6
 ## currently supported methods: original, em_uncertainty, em_sparse, greedy_pseudo_labeling, ctc, beam_search_max, beam_search_all, beam_search_negative_sampling, diversity_maximization, renyi_em
 method: [renyi_em, beam_search_negative_sampling]
 decoding_method: beam_search # greedy_search or beam_search
-lm_coef: 0.3
+lm_coef: 0
 
 ### beam search
 beam_width: 3

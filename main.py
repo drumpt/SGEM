@@ -169,6 +169,10 @@ def main(args):
     dataset = load_dataset(args.dataset_name, args.dataset_dir, args.batch_size, args.extra_noise, args.noise_type)
     gt_texts, ori_transcriptions, transcriptions_1, transcriptions_3, transcriptions_5, transcriptions_10, transcriptions_20, transcriptions_40 = [], [], [], [], [], [], [], []
 
+    # TODO: need to be adjusted
+    if args.print_all_steps:
+        nested_transcription_list = [[] for _ in range(1, args.steps + 1)]
+
     model = get_model(args)
     original_model = get_model(args)
     params, _ = collect_params(model, args.train_params)
@@ -226,14 +230,19 @@ def main(args):
             model = set_rnn_to_train(model)
             forward_and_adapt(args, model, decoder_processor, optimizer, scheduler, wavs, lens)
 
-            if step_idx in [1, 3, 5, 10, 20, 40]:
+            # TODO: need to be adjusted
+            if step_idx in [1, 3, 5, 10, 20, 40] or args.print_all_steps:
                 transcription = transcribe_batch(args, model, processor, wavs, lens)
-                transcription_list = eval(f"transcriptions_{step_idx}")
-                transcription_list.extend(transcription)
 
-                ada_wer = wer(list(texts), list(transcription))
-                logger.info(f"adapt-{step_idx} WER: {ada_wer}")
-                logger.info(f"adapt-{step_idx} text: {' '.join(list(transcription))}")
+                if step_idx in [1, 3, 5, 10, 20, 40]:
+                    transcription_list = eval(f"transcriptions_{step_idx}")
+                    transcription_list.extend(transcription)
+                    ada_wer = wer(list(texts), list(transcription))
+                    logger.info(f"adapt-{step_idx} WER: {ada_wer}")
+                    logger.info(f"adapt-{step_idx} text: {' '.join(list(transcription))}")
+                
+                if args.print_all_steps:
+                    nested_transcription_list[step_idx - 1].extend(transcription)
 
         gc.collect()
         torch.cuda.empty_cache()
@@ -247,6 +256,11 @@ def main(args):
             break
         transcription_list = eval(f"transcriptions_{step_idx}")
         logger.info(f"TTA-{step_idx}: {wer(gt_texts, transcription_list)}")
+
+    if args.print_all_steps:
+        for step_idx in range(1, steps + 1):
+            transcription_list = nested_transcription_list[step_idx - 1]
+            logger.info(f"TTA-{step_idx}: {wer(gt_texts, transcription_list)}")
 
     transcription_dict = {"gt_texts": gt_texts, "ori_transcriptions": ori_transcriptions, "transcriptions_1": transcriptions_1, "transcriptions_3": transcriptions_3, "transcriptions_5": transcriptions_5, "transcriptions_10": transcriptions_10, "transcriptions_20": transcriptions_20, "transcriptions_40": transcriptions_40}
     dirname, filename = os.path.dirname(logger.handlers[0].baseFilename), os.path.basename(logger.handlers[0].baseFilename).replace("log", "transcriptions").replace("txt", "pickle")
