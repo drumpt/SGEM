@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
-from transformers import Wav2Vec2ForCTC
+from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor, Wav2Vec2ProcessorWithLM
 from speechbrain.pretrained import EncoderDecoderASR
 from speechbrain.decoders.ctc import CTCPrefixScorer
 import nemo.collections.asr as nemo_asr
@@ -60,8 +60,14 @@ def transcribe_batch(args, model, processor, wavs, lens):
             wav = wav[:len].unsqueeze(0)
             outputs = model(wav).logits
             predicted_ids = torch.argmax(outputs, dim=-1)
-            text = processor.batch_decode(predicted_ids)
-            transcription.append(text[0])
+            if isinstance(processor, Wav2Vec2Processor): # greedy decoding
+                text = processor.batch_decode(predicted_ids)[0]
+            elif isinstance(processor, Wav2Vec2ProcessorWithLM): # beam search decoding with external language model                
+                text = processor.decode(
+                    outputs.squeeze(0).detach().cpu().numpy(),
+                    beam_width=args.beam_width,
+                ).text
+            transcription.append(text)
     elif isinstance(model, EncoderDecoderASR):
         for wav, len in zip(wavs, lens):
             wav = wav[:len].unsqueeze(0)
