@@ -214,7 +214,7 @@ def main(args):
         lens = lens.to(args.device)
 
         gt_texts.extend(texts)
-        ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
+        ori_transcription = transcribe_batch(args, original_model, decoder_processor, wavs, lens)
         ori_transcriptions.extend(ori_transcription)
         ori_wer = wer(list(texts), list(ori_transcription))
 
@@ -232,7 +232,7 @@ def main(args):
 
             # TODO: need to be adjusted
             if step_idx in [1, 3, 5, 10, 20, 40] or args.print_all_steps:
-                transcription = transcribe_batch(args, model, processor, wavs, lens)
+                transcription = transcribe_batch(args, model, decoder_processor, wavs, lens)
 
                 if step_idx in [1, 3, 5, 10, 20, 40]:
                     transcription_list = eval(f"transcriptions_{step_idx}")
