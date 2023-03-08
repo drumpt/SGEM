@@ -22,7 +22,7 @@ batch_size: 1
 
 ### device and amp
 device: cuda
-use_amp: true
+# use_amp: true
 
 ### logging
 log_dir: exps/tasper_ctc
@@ -35,6 +35,7 @@ optimizer: AdamW
 train_params: [feature] # currently supported: all, feature, LN, linear(linear probing), enc, dec
 steps: 10
 episodic: true # load pretrained model again for every batch
+# print_all_steps: false
 
 lr: 4e-5
 scheduler: CosineAnnealingLR # null or CosineAnnealingLR

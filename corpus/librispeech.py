@@ -32,8 +32,6 @@ class LibriDataset(Dataset):
             file_list += split_list
         file_list.sort()
 
-        # "/home/server27/hdd/changhun_workspace/nfs-client/MS-SNSD/libri_test_noise"
-
         text = []
         for f in tqdm(file_list, desc='Read text'):
             transcription = read_text(str(f))
