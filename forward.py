@@ -1,9 +1,7 @@
-import time
 import math
 from typing import Any, Dict, List, Optional, Tuple, Union
 from dataclasses import dataclass, field
 import heapq
-import copy
 
 import numpy as np
 import torch
@@ -102,7 +100,6 @@ def forward_batch(args, model, processor, wavs, lens, labels=None):
     if isinstance(model, Wav2Vec2ForCTC):
         outputs = forward_ctc_or_conformer(args, model, processor, wavs, lens, labels)
     elif isinstance(model, EncoderDecoderASR):
-        # TODO: need to be changed after debugging (annotations should be reversed)
         model.mods.decoder.dec.train()
         # model.mods.decoder.lm_weight = args.lm_coef
         outputs = forward_attn(args, model, wavs, lens, labels)
