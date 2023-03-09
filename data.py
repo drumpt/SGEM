@@ -1,5 +1,4 @@
 import torch
-torch.manual_seed(0) # TODO: need to be removed
 import torchaudio
 from functools import partial
 from torch.utils.data import DataLoader

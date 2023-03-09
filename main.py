@@ -1,13 +1,10 @@
-import time
 import os
 import gc
 import hydra
 from omegaconf import OmegaConf
-import pickle
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 torch.backends.cudnn.enabled = True
 torch.backends.cudnn.deterministic = True
@@ -44,22 +41,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
                         e_loss = softmax_entropy(outputs / args.temp)[non_blank].mean(0).mean()
                     else: 
                         e_loss = softmax_entropy(outputs / args.temp).mean(0).mean() 
-                elif "em_uncertainty" in args.method:
-                    if args.not_blank:
-                        frame_weight = F.normalize(softmax_entropy(outputs)[non_blank], p=1, dim=-1).detach()
-                        e_loss = torch.sum(frame_weight * softmax_entropy(outputs / args.temp)[non_blank], dim=-1).mean()
-                    else:
-                        frame_weight = F.normalize(softmax_entropy(outputs), dim=-1).detach()
-                        e_loss = torch.sum(frame_weight * softmax_entropy(outputs / args.temp), dim=-1).mean()
-                elif "em_sparse" in args.method:
-                    if args.not_blank:
-                        selected_frame = non_blank & torch.where(softmax_entropy(outputs, dim=-1) < args.entropy_threshold, 1, 0).bool()
-                        e_loss = softmax_entropy(outputs / args.temp)[selected_frame].mean(0).mean()
-                    else:
-                        selected_frame = torch.where(softmax_entropy(outputs, dim=-1) < args.entropy_threshold, 1, 0).bool()
-                        e_loss = softmax_entropy(outputs / args.temp)[selected_frame].mean(0).mean()
                 (args.em_coef * e_loss / (len(wavs))).backward(retain_graph=True)
-
             if 1 - args.em_coef > 0:
                 c_loss = mcc_loss(outputs / args.temp, class_num=outputs.shape[-1], reweight=True)
                 ((1 - args.em_coef) * c_loss / (len(wavs))).backward(retain_graph=True)
@@ -169,10 +151,6 @@ def main(args):
     dataset = load_dataset(args.dataset_name, args.dataset_dir, args.batch_size, args.extra_noise, args.noise_type)
     gt_texts, ori_transcriptions, transcriptions_1, transcriptions_3, transcriptions_5, transcriptions_10, transcriptions_20, transcriptions_40 = [], [], [], [], [], [], [], []
 
-    # TODO: need to be adjusted
-    if args.print_all_steps:
-        nested_transcription_list = [[] for _ in range(1, args.steps + 1)]
-
     model = get_model(args)
     original_model = get_model(args)
     params, _ = collect_params(model, args.train_params)
@@ -180,13 +158,13 @@ def main(args):
     processor = Wav2Vec2Processor.from_pretrained(args.asr, sampling_rate=args.sample_rate, return_attention_mask=True) if isinstance(model, Wav2Vec2ForCTC) else None
 
     if isinstance(model, Wav2Vec2ForCTC):
-        decoder_processor = Wav2Vec2ProcessorWithLM.from_pretrained("patrickvonplaten/wav2vec2-base-100h-with-lm")
+        decoder_processor = Wav2Vec2ProcessorWithLM.from_pretrained(args.processor)
     elif isinstance(model, EncoderDecoderASR):
         decoder_processor = None
     elif isinstance(model, nemo_asr.models.EncDecCTCModelBPE):
         decoder_processor = BeamSearchDecoderCTC(
             alphabet=Alphabet(labels=model.decoder.vocabulary+[""], is_bpe=True),
-            language_model=LanguageModel.load_from_dir("pretrained_models/wav2vec2-base-100h-with-lm/snapshots/0612413f4d1532f2e50c039b2f014722ea59db4e/language_model")
+            language_model=LanguageModel.load_from_dir(args.processor)
         )
     elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
         decoder_processor = BeamRNNTInfer(
@@ -203,9 +181,6 @@ def main(args):
         original_model_state, original_optimizer_state, original_scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
     for batch_idx, batch in enumerate(dataset):
-        if args.dataset_name == "commonvoice" and batch_idx >= 1000:
-            break
-
         lens, wavs, texts, _ = batch
         if isinstance(model, Wav2Vec2ForCTC):
             wavs = processor(wavs, sampling_rate=args.sample_rate, return_tensors="pt", padding="longest").input_values.to(args.device)
@@ -214,7 +189,7 @@ def main(args):
         lens = lens.to(args.device)
 
         gt_texts.extend(texts)
-        ori_transcription = transcribe_batch(args, original_model, decoder_processor, wavs, lens)
+        ori_transcription = transcribe_batch(args, original_model, processor, wavs, lens)
         ori_transcriptions.extend(ori_transcription)
         ori_wer = wer(list(texts), list(ori_transcription))
 
@@ -229,20 +204,14 @@ def main(args):
         for step_idx in range(1, steps + 1):
             model = set_rnn_to_train(model)
             forward_and_adapt(args, model, decoder_processor, optimizer, scheduler, wavs, lens)
+            transcription = transcribe_batch(args, model, processor, wavs, lens)
 
-            # TODO: need to be adjusted
-            if step_idx in [1, 3, 5, 10, 20, 40] or args.print_all_steps:
-                transcription = transcribe_batch(args, model, decoder_processor, wavs, lens)
-
-                if step_idx in [1, 3, 5, 10, 20, 40]:
-                    transcription_list = eval(f"transcriptions_{step_idx}")
-                    transcription_list.extend(transcription)
-                    ada_wer = wer(list(texts), list(transcription))
-                    logger.info(f"adapt-{step_idx} WER: {ada_wer}")
-                    logger.info(f"adapt-{step_idx} text: {' '.join(list(transcription))}")
-                
-                if args.print_all_steps:
-                    nested_transcription_list[step_idx - 1].extend(transcription)
+            if step_idx in [1, 3, 5, 10, 20, 40]:
+                transcription_list = eval(f"transcriptions_{step_idx}")
+                transcription_list.extend(transcription)
+                ada_wer = wer(list(texts), list(transcription))
+                logger.info(f"adapt-{step_idx} WER: {ada_wer}")
+                logger.info(f"adapt-{step_idx} text: {' '.join(list(transcription))}")
 
         gc.collect()
         torch.cuda.empty_cache()
@@ -257,15 +226,6 @@ def main(args):
         transcription_list = eval(f"transcriptions_{step_idx}")
         logger.info(f"TTA-{step_idx}: {wer(gt_texts, transcription_list)}")
 
-    if args.print_all_steps:
-        for step_idx in range(1, steps + 1):
-            transcription_list = nested_transcription_list[step_idx - 1]
-            logger.info(f"TTA-{step_idx}: {wer(gt_texts, transcription_list)}")
-
-    transcription_dict = {"gt_texts": gt_texts, "ori_transcriptions": ori_transcriptions, "transcriptions_1": transcriptions_1, "transcriptions_3": transcriptions_3, "transcriptions_5": transcriptions_5, "transcriptions_10": transcriptions_10, "transcriptions_20": transcriptions_20, "transcriptions_40": transcriptions_40}
-    dirname, filename = os.path.dirname(logger.handlers[0].baseFilename), os.path.basename(logger.handlers[0].baseFilename).replace("log", "transcriptions").replace("txt", "pickle")
-    with open(os.path.join(dirname, filename), 'wb') as f:
-        pickle.dump(transcription_dict, f)
 
 
 if __name__ == '__main__':

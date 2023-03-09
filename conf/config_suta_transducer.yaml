@@ -1,7 +1,10 @@
 ### model
 # asr: facebook/wav2vec2-base-960h
+# processor: patrickvonplaten/wav2vec2-base-100h-with-lm
 # asr: pretrained_models/stt_en_conformer_ctc_small_ls.nemo
+# processor: pretrained_models/wav2vec2-base-100h-with-lm/snapshots/0612413f4d1532f2e50c039b2f014722ea59db4e/language_model
 asr: pretrained_models/stt_en_conformer_transducer_small.nemo
+processor: null
 
 ### dataset
 # dataset_name: librispeech
