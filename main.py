@@ -45,7 +45,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             if 1 - args.em_coef > 0:
                 c_loss = mcc_loss(outputs / args.temp, class_num=outputs.shape[-1], reweight=True)
                 ((1 - args.em_coef) * c_loss / (len(wavs))).backward(retain_graph=True)
-        if 'beam_search_max' in args.method or 'beam_search_all' in args.method or 'beam_search_negative_sarling' in args.method:
+        if 'beam_search_max' in args.method or 'beam_search_all' in args.method or 'beam_search_negative_sampling' in args.method:
             criterion = nn.CrossEntropyLoss(ignore_index=blank_index) if args.not_blank else nn.CrossEntropyLoss()
             if 'beam_search_max' in args.method:
                 char_history = pseudo_labels[0].to(args.device)
@@ -181,6 +181,9 @@ def main(args):
         original_model_state, original_optimizer_state, original_scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
     for batch_idx, batch in enumerate(dataset):
+        if args.dataset_name == "commonvoice" and batch_idx >= 1000:
+            break
+
         lens, wavs, texts, _ = batch
         if isinstance(model, Wav2Vec2ForCTC):
             wavs = processor(wavs, sampling_rate=args.sample_rate, return_tensors="pt", padding="longest").input_values.to(args.device)
