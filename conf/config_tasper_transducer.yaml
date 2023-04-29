@@ -20,6 +20,7 @@ dataset_dir: /home/server17/hdd/changhun_workspace/CHiME3
 
 extra_noise: 0.00
 noise_type: null # currently supported: null, AirConditioner_6, AirportAnnouncements_2, Babble_4, CopyMachine_2, Munching_3, Neighbor_6, ShuttingDoor_6, Typing_2, VacuumCleaner_1
+noise_snr: 10
 sample_rate: 16000
 batch_size: 1
 
@@ -48,7 +49,7 @@ lr_min: 2e-6
 ## currently supported methods: original, em_uncertainty, em_sparse, greedy_pseudo_labeling, ctc, beam_search_max, beam_search_all, beam_search_negative_sampling, diversity_maximization, renyi_em
 method: [renyi_em, beam_search_negative_sampling]
 decoding_method: beam_search # greedy_search or beam_search
-lm_coef: 0
+lm_coef: 0.3
 
 ### beam search
 beam_width: 3

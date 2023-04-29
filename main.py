@@ -45,7 +45,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             if 1 - args.em_coef > 0:
                 c_loss = mcc_loss(outputs / args.temp, class_num=outputs.shape[-1], reweight=True)
                 ((1 - args.em_coef) * c_loss / (len(wavs))).backward(retain_graph=True)
-        if 'beam_search_max' in args.method or 'beam_search_all' in args.method or 'beam_search_negative_sampling' in args.method:
+        if 'beam_search_max' in args.method or 'beam_search_all' in args.method or 'beam_search_negative_sarling' in args.method:
             criterion = nn.CrossEntropyLoss(ignore_index=blank_index) if args.not_blank else nn.CrossEntropyLoss()
             if 'beam_search_max' in args.method:
                 char_history = pseudo_labels[0].to(args.device)
@@ -148,7 +148,7 @@ def main(args):
     logger = get_logger(args)
     logger.info(OmegaConf.to_yaml(args))
 
-    dataset = load_dataset(args.dataset_name, args.dataset_dir, args.batch_size, args.extra_noise, args.noise_type)
+    dataset = load_dataset(args.dataset_name, args.dataset_dir, args.batch_size, args.extra_noise, args.noise_type, args.noise_snr)
     gt_texts, ori_transcriptions, transcriptions_1, transcriptions_3, transcriptions_5, transcriptions_10, transcriptions_20, transcriptions_40 = [], [], [], [], [], [], [], []
 
     model = get_model(args)
