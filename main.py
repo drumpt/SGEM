@@ -6,7 +6,7 @@ from omegaconf import OmegaConf
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
-torch.backends.cudnn.enabled = True
+torch.backends.cudnn.enabled = False
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
@@ -25,6 +25,8 @@ from utils import *
 
 
 def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
+    global original_model
+
     optimizer.zero_grad()
     blank_index = get_blank_index(args, model, processor)
 
@@ -45,7 +47,7 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             if 1 - args.em_coef > 0:
                 c_loss = mcc_loss(outputs / args.temp, class_num=outputs.shape[-1], reweight=True)
                 ((1 - args.em_coef) * c_loss / (len(wavs))).backward(retain_graph=True)
-        if 'beam_search_max' in args.method or 'beam_search_all' in args.method or 'beam_search_negative_sarling' in args.method:
+        if 'beam_search_max' in args.method or 'beam_search_all' in args.method or 'beam_search_negative_sampling' in args.method:
             criterion = nn.CrossEntropyLoss(ignore_index=blank_index) if args.not_blank else nn.CrossEntropyLoss()
             if 'beam_search_max' in args.method:
                 char_history = pseudo_labels[0].to(args.device)
@@ -120,6 +122,8 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
                 elif args.negative_sampling_method == 'ns3l':
                     negative_mask = torch.where(torch.softmax(negative_outputs, dim=-1) < args.ns_threshold * (10 / negative_outputs.shape[-1]), 1, 0)
                     negative_loss += torch.mean(-torch.log(1 - torch.sum(negative_mask * torch.softmax(negative_outputs / args.temp, dim=-1), dim=-1)))
+
+                print(f"negative_loss: {negative_loss}")
                 if torch.is_tensor(negative_loss):
                     (args.ns_coef * negative_loss / len(wavs)).backward(retain_graph=True)
         if 'renyi_em' in args.method:
@@ -130,7 +134,56 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
                 e_loss = renyi_entropy((outputs / args.temp)[non_blank], alpha=args.renyi_entropy_alpha)
             else:
                 e_loss = renyi_entropy(outputs / args.temp, alpha=args.renyi_entropy_alpha)
+            print(f"e_loss: {e_loss}")
+
             (e_loss / (len(wavs))).backward(retain_graph=True)
+        if 'kld_ori' in args.method:
+            assert 0 <= args.kld_weight <= 1
+            # TODO: implement bias parameter
+
+            # naive pseudo-labeling
+            predicted_ids = torch.argmax(outputs, dim=-1)
+            non_blank = torch.where(predicted_ids != blank_index, 1, 0).bool()
+            # e_loss = renyi_entropy((outputs / args.temp)[non_blank], alpha='inf')
+            e_loss = renyi_entropy(outputs, alpha='inf')
+            ((1 - args.kld_weight) * e_loss / (len(wavs))).backward(retain_graph=True)
+
+            # kld loss
+            original_outputs, _ = get_logits_and_pseudo_labels(args, original_model, processor, wav, torch.FloatTensor([lens[i]]).to(wav.device))
+            probs = torch.softmax(outputs, dim=-1)
+            original_probs = torch.softmax(original_outputs, dim=-1)
+            kl_div_loss = F.kl_div(torch.log(probs), original_probs.detach(), reduction="batchmean")
+            (args.kld_weight * kl_div_loss / (len(wavs))).backward(retain_graph=True)
+        if 'kld_comb' in args.method:
+            # Renyi em
+            predicted_ids = torch.argmax(outputs, dim=-1)
+            non_blank = torch.where(predicted_ids != blank_index, 1, 0).bool()
+            if args.not_blank:
+                e_loss = renyi_entropy((outputs / args.temp)[non_blank], alpha=args.renyi_entropy_alpha)
+            else:
+                e_loss = renyi_entropy(outputs / args.temp, alpha=args.renyi_entropy_alpha)
+            ((1 - args.kld_weight) * e_loss / (len(wavs))).backward(retain_graph=True)
+
+            # negative sampling
+            criterion = nn.CrossEntropyLoss(ignore_index=blank_index) if args.not_blank else nn.CrossEntropyLoss()
+            negative_outputs = outputs.clone()
+            negative_loss = 0
+            char_history = pseudo_labels[0].to(args.device)
+            negative_mask = torch.where(torch.softmax(negative_outputs, dim=-1) < args.ns_threshold * (10 / negative_outputs.shape[-1]), 1, 0)
+            negative_loss += torch.mean(-torch.log(1 - torch.sum(negative_mask * torch.softmax(negative_outputs / args.temp, dim=-1), dim=-1)))
+            if torch.is_tensor(negative_loss):
+                ((1 - args.kld_weight) * args.ns_coef * negative_loss / len(wavs)).backward(retain_graph=True)
+
+            # kld loss
+            original_outputs, _ = get_logits_and_pseudo_labels(args, original_model, processor, wav, torch.FloatTensor([lens[i]]).to(wav.device))
+            probs = torch.softmax(outputs, dim=-1)
+            original_probs = torch.softmax(original_outputs, dim=-1)
+            kl_div_loss = F.kl_div(torch.log(probs), original_probs.detach(), reduction="batchmean")
+            (args.kld_weight * kl_div_loss / (len(wavs))).backward(retain_graph=True)
+
+            print(f"e_loss: {e_loss}")
+            print(f"negative_loss: {negative_loss}")
+            print(f"kl_div_loss: {kl_div_loss}")
 
     optimizer.step()
     if scheduler is not None:
@@ -150,6 +203,8 @@ def main(args):
 
     dataset = load_dataset(args.dataset_name, args.dataset_dir, args.batch_size, args.extra_noise, args.noise_type, args.noise_snr)
     gt_texts, ori_transcriptions, transcriptions_1, transcriptions_3, transcriptions_5, transcriptions_10, transcriptions_20, transcriptions_40 = [], [], [], [], [], [], [], []
+
+    global original_model
 
     model = get_model(args)
     original_model = get_model(args)
@@ -181,6 +236,9 @@ def main(args):
         original_model_state, original_optimizer_state, original_scheduler_state = copy_model_and_optimizer(model, optimizer, scheduler)
 
     for batch_idx, batch in enumerate(dataset):
+        if args.dataset_name == "commonvoice" and batch_idx >= 1000:
+            break
+
         lens, wavs, texts, _ = batch
         if isinstance(model, Wav2Vec2ForCTC):
             wavs = processor(wavs, sampling_rate=args.sample_rate, return_tensors="pt", padding="longest").input_values.to(args.device)
