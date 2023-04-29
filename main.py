@@ -6,7 +6,7 @@ from omegaconf import OmegaConf
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
-torch.backends.cudnn.enabled = True
+torch.backends.cudnn.enabled = False
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
@@ -25,6 +25,8 @@ from utils import *
 
 
 def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
+    global original_model
+
     optimizer.zero_grad()
     blank_index = get_blank_index(args, model, processor)
 
@@ -131,6 +133,49 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             else:
                 e_loss = renyi_entropy(outputs / args.temp, alpha=args.renyi_entropy_alpha)
             (e_loss / (len(wavs))).backward(retain_graph=True)
+        if 'kld_ori' in args.method:
+            assert 0 <= args.kld_weight <= 1
+            # TODO: implement bias parameter
+
+            # naive pseudo-labeling
+            predicted_ids = torch.argmax(outputs, dim=-1)
+            non_blank = torch.where(predicted_ids != blank_index, 1, 0).bool()
+            # e_loss = renyi_entropy(outputs, alpha='inf')
+            e_loss = renyi_entropy((outputs / args.temp)[non_blank], alpha='inf')
+            ((1 - args.kld_weight) * e_loss / (len(wavs))).backward(retain_graph=True)
+
+            # kld loss
+            original_outputs, _ = get_logits_and_pseudo_labels(args, original_model, processor, wav, torch.FloatTensor([lens[i]]).to(wav.device))
+            probs = torch.softmax(outputs, dim=-1)
+            original_probs = torch.softmax(original_outputs, dim=-1)
+            kl_div_loss = F.kl_div(torch.log(probs), original_probs.detach(), reduction="batchmean")
+            (args.kld_weight * kl_div_loss / (len(wavs))).backward(retain_graph=True)
+        if 'kld_comb' in args.method:
+            # Renyi em
+            predicted_ids = torch.argmax(outputs, dim=-1)
+            non_blank = torch.where(predicted_ids != blank_index, 1, 0).bool()
+            if args.not_blank:
+                e_loss = renyi_entropy((outputs / args.temp)[non_blank], alpha=args.renyi_entropy_alpha)
+            else:
+                e_loss = renyi_entropy(outputs / args.temp, alpha=args.renyi_entropy_alpha)
+            ((1 - args.kld_weight) * e_loss / (len(wavs))).backward(retain_graph=True)
+
+            # negative sampling
+            criterion = nn.CrossEntropyLoss(ignore_index=blank_index) if args.not_blank else nn.CrossEntropyLoss()
+            negative_outputs = outputs.clone()
+            negative_loss = 0
+            char_history = pseudo_labels[0].to(args.device)
+            negative_mask = torch.where(torch.softmax(negative_outputs, dim=-1) < args.ns_threshold * (10 / negative_outputs.shape[-1]), 1, 0)
+            negative_loss += torch.mean(-torch.log(1 - torch.sum(negative_mask * torch.softmax(negative_outputs / args.temp, dim=-1), dim=-1)))
+            if torch.is_tensor(negative_loss):
+                ((1 - args.kld_weight) * args.ns_coef * negative_loss / len(wavs)).backward(retain_graph=True)
+
+            # kld loss
+            original_outputs, _ = get_logits_and_pseudo_labels(args, original_model, processor, wav, torch.FloatTensor([lens[i]]).to(wav.device))
+            probs = torch.softmax(outputs, dim=-1)
+            original_probs = torch.softmax(original_outputs, dim=-1)
+            kl_div_loss = F.kl_div(torch.log(probs), original_probs.detach(), reduction="batchmean")
+            (args.kld_weight * kl_div_loss / (len(wavs))).backward(retain_graph=True)
 
     optimizer.step()
     if scheduler is not None:
@@ -150,6 +195,8 @@ def main(args):
 
     dataset = load_dataset(args.dataset_name, args.dataset_dir, args.batch_size, args.extra_noise, args.noise_type, args.noise_snr)
     gt_texts, ori_transcriptions, transcriptions_1, transcriptions_3, transcriptions_5, transcriptions_10, transcriptions_20, transcriptions_40 = [], [], [], [], [], [], [], []
+
+    global original_model
 
     model = get_model(args)
     original_model = get_model(args)
