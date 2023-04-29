@@ -122,8 +122,6 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
                 elif args.negative_sampling_method == 'ns3l':
                     negative_mask = torch.where(torch.softmax(negative_outputs, dim=-1) < args.ns_threshold * (10 / negative_outputs.shape[-1]), 1, 0)
                     negative_loss += torch.mean(-torch.log(1 - torch.sum(negative_mask * torch.softmax(negative_outputs / args.temp, dim=-1), dim=-1)))
-
-                print(f"negative_loss: {negative_loss}")
                 if torch.is_tensor(negative_loss):
                     (args.ns_coef * negative_loss / len(wavs)).backward(retain_graph=True)
         if 'renyi_em' in args.method:
@@ -134,8 +132,6 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
                 e_loss = renyi_entropy((outputs / args.temp)[non_blank], alpha=args.renyi_entropy_alpha)
             else:
                 e_loss = renyi_entropy(outputs / args.temp, alpha=args.renyi_entropy_alpha)
-            print(f"e_loss: {e_loss}")
-
             (e_loss / (len(wavs))).backward(retain_graph=True)
         if 'kld_ori' in args.method:
             assert 0 <= args.kld_weight <= 1
@@ -144,8 +140,8 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             # naive pseudo-labeling
             predicted_ids = torch.argmax(outputs, dim=-1)
             non_blank = torch.where(predicted_ids != blank_index, 1, 0).bool()
-            # e_loss = renyi_entropy((outputs / args.temp)[non_blank], alpha='inf')
-            e_loss = renyi_entropy(outputs, alpha='inf')
+            # e_loss = renyi_entropy(outputs, alpha='inf')
+            e_loss = renyi_entropy((outputs / args.temp)[non_blank], alpha='inf')
             ((1 - args.kld_weight) * e_loss / (len(wavs))).backward(retain_graph=True)
 
             # kld loss
@@ -180,10 +176,6 @@ def forward_and_adapt(args, model, processor, optimizer, scheduler, wavs, lens):
             original_probs = torch.softmax(original_outputs, dim=-1)
             kl_div_loss = F.kl_div(torch.log(probs), original_probs.detach(), reduction="batchmean")
             (args.kld_weight * kl_div_loss / (len(wavs))).backward(retain_graph=True)
-
-            print(f"e_loss: {e_loss}")
-            print(f"negative_loss: {negative_loss}")
-            print(f"kl_div_loss: {kl_div_loss}")
 
     optimizer.step()
     if scheduler is not None:
