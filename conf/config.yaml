@@ -52,7 +52,7 @@ lr_min: 2e-5
 method: [renyi_em, beam_search_negative_sampling]
 decoding_method: beam_search # greedy_search or beam_search
 lm_coef: 0.3
-kld_weight: 0.0625 # 0, 0.0625(1/16), 0.125(1/8), 0.25(1/4), 9.5(1/2)
+kld_weight: 0.0625 # 0, 0.0625(1/16), 0.125(1/8), 0.25(1/4), 0.5(1/2)
 
 ### beam search
 beam_width: 5
