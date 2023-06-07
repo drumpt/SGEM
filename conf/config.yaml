@@ -7,8 +7,8 @@ processor: patrickvonplaten/wav2vec2-base-100h-with-lm
 # processor: null
 
 ### dataset
-# dataset_name: librispeech
-# dataset_dir: /home/server17/hdd/changhun_workspace/LibriSpeech
+dataset_name: librispeech
+dataset_dir: /home/server17/hdd/changhun_workspace/LibriSpeech
 # dataset_name: chime
 # dataset_dir: /home/server17/hdd/changhun_workspace/CHiME3
 # dataset_name: ted
