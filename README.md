@@ -21,13 +21,22 @@ pip install -r requirements.txt
 
 
 
-### Data Preparation
-Currently, our code only supports [Librispeech](https://www.openslr.org/12)/[CHiME-3](https://catalog.ldc.upenn.edu/LDC2017S24)/[Common voice En](https://tinyurl.com/cvjune2020)/[TED-LIUM 2](https://www.openslr.org/51/)
-You have to download datasets by your own.
+### Datasets
+- [LibriSpeech](https://www.openslr.org/12)
+- [CHiME-3](https://catalog.ldc.upenn.edu/LDC2017S24)
+- [TED-LIUM 2](https://lium.univ-lemans.fr/ted-lium2/)
+- [CommonVoice](https://tinyurl.com/cvjune2020)
+- [Valentini](https://datashare.ed.ac.uk/handle/10283/2791)
+- [L2-Arctic](https://psi.engr.tamu.edu/l2-arctic-corpus/)
+- [MS-SNSD](https://github.com/microsoft/MS-SNSD)
 
 
 
-### Pretraiend Models
+### Pre-traiend Models
+- [CTC-based Model](https://huggingface.co/facebook/wav2vec2-base-960h)
+- [Conformer](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_conformer_ctc_small)
+- [Transducer](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_conformer_transducer_small)
+- [4-gram Language Model for CTC-based Model](https://huggingface.co/patrickvonplaten/wav2vec2-base-100h-with-lm)
 
 
 
