@@ -6,7 +6,7 @@ from omegaconf import OmegaConf
 import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pad_sequence
-torch.backends.cudnn.enabled = False
+torch.backends.cudnn.enabled = True
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
