@@ -50,11 +50,6 @@ bash scripts/{dataset_name: LS/CH/CV/TD}.sh
 
 
 
-### Contact
-If you have any questions or comments, feel free to contact us via changhun.kim@kaist.ac.kr.
-
-
-
 ### Citation
 ```
 @inproceedings{kim2023sgem,
@@ -64,3 +59,8 @@ If you have any questions or comments, feel free to contact us via changhun.kim@
   year={2023}
 }
 ```
+
+
+
+### Contact
+If you have any questions or comments, feel free to contact us via changhun.kim@kaist.ac.kr.
