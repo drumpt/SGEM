@@ -4,7 +4,7 @@
 
 
 ### Introduction
-This repository contains the official TensorFlow implementation of the following paper:
+This repository contains the official PyTorch implementation of the following paper:
 
 > [**SGEM: Test-Time Adaptation for Automatic Speech Recognition via Sequential-Level Generalized Entropy Minimization**](https://arxiv.org/abs/2306.01981)<br>
 > Changhun Kim, Joonhyung Park, Hajin Shim and Eunho Yang<br>
