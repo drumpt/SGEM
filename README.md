@@ -3,7 +3,7 @@
 
 
 
-### Introduction
+## Introduction
 This repository contains the official PyTorch implementation of the following paper:
 
 > [**SGEM: Test-Time Adaptation for Automatic Speech Recognition via Sequential-Level Generalized Entropy Minimization**](https://arxiv.org/abs/2306.01981)<br>
@@ -14,14 +14,14 @@ This repository contains the official PyTorch implementation of the following pa
 
 
 
-### Environmental Setup 
+## Environmental Setup 
 ```
 pip install -r requirements.txt
 ```
 
 
 
-### Datasets
+## Datasets
 - [LibriSpeech](https://www.openslr.org/12)
 - [CHiME-3](https://catalog.ldc.upenn.edu/LDC2017S24)
 - [TED-LIUM 2](https://lium.univ-lemans.fr/ted-lium2/)
@@ -32,7 +32,7 @@ pip install -r requirements.txt
 
 
 
-### Pre-traiend Models
+## Pre-traiend Models
 - [CTC-based Model](https://huggingface.co/facebook/wav2vec2-base-960h)
 - [Conformer](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_conformer_ctc_small)
 - [Transducer](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_conformer_transducer_small)
@@ -40,7 +40,7 @@ pip install -r requirements.txt
 
 
 
-### Run
+## Run
 The source ASR model is [w2v2-base fine-tuned on Librispeech 960 hours](https://huggingface.co/facebook/wav2vec2-base-960h). The pre-trained model is imported by Huggingface.
 
 Run SUTA on different datasets:
@@ -50,7 +50,7 @@ bash scripts/{dataset_name: LS/CH/CV/TD}.sh
 
 
 
-### Citation
+## Citation
 ```
 @inproceedings{kim2023sgem,
   title={{SGEM}: Test-Time Adaptation for Automatic Speech Recognition via Sequential-Level Generalized Entropy Minimization},
@@ -62,5 +62,5 @@ bash scripts/{dataset_name: LS/CH/CV/TD}.sh
 
 
 
-### Contact
+## Contact
 If you have any questions or comments, feel free to contact us via changhun.kim@kaist.ac.kr.
