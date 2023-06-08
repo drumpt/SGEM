@@ -55,11 +55,6 @@ If you have any questions or comments, feel free to contact us via changhun.kim@
 
 
 
-### License
-This project is licensed under the terms of the MIT license.
-
-
-
 ### Citation
 ```
 @inproceedings{kim2023sgem,
