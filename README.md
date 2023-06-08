@@ -1,4 +1,4 @@
-# SGEM: Test-Time Adaptation for Automatic Speech Recognition via Sequential-Level Generalized Entropy Minimization
+# SGEM: Test-Time Adaptation for Automatic Speech Recognition via Sequential-Level Generalized Entropy Minimization (INTERSPEECH 2023)
 ![](res/concept_figure.png)
 
 
