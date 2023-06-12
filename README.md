@@ -16,6 +16,8 @@ This repository contains the official PyTorch implementation of the following pa
 
 ## Environmental Setup 
 ```
+conda create -y -n tta python=3.7
+conda activate tta
 pip install -r requirements.txt
 ```
 
