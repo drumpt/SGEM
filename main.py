@@ -211,7 +211,7 @@ def main(args):
     elif isinstance(model, nemo_asr.models.EncDecCTCModelBPE):
         decoder_processor = BeamSearchDecoderCTC(
             alphabet=Alphabet(labels=model.decoder.vocabulary+[""], is_bpe=True),
-            language_model=LanguageModel.load_from_dir(args.processor)
+            language_model=LanguageModel.load_from_dir(args.processor),
         )
     elif isinstance(model, nemo_asr.models.EncDecRNNTBPEModel):
         decoder_processor = BeamRNNTInfer(
