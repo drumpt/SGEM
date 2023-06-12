@@ -23,16 +23,38 @@ pip install -r requirements.txt
 
 ## Datasets
 - [LibriSpeech](https://www.openslr.org/12)
+  - You can get test-other.tar.gz in LibriSpeech using the link above.
 - [CHiME-3](https://catalog.ldc.upenn.edu/LDC2017S24)
+  - You need to manually download CHiME-3 dataset using the link above with a *standard Linguistic Data Consortium account*.
 - [TED-LIUM 2](https://lium.univ-lemans.fr/ted-lium2/)
+  - You can get TED-LIUM 2 dataset using the link above.
+  - You also need to preprocess the data with data/preprocess_ted.py and data/preprocess_ted.sh.
 - [CommonVoice](https://tinyurl.com/cvjune2020)
+  - You can get en.tar.gz in CommonVoice dataset using the link above.
 - [Valentini](https://datashare.ed.ac.uk/handle/10283/2791)
+  - You can get noisy_testset_wav.zip and testset_txt.zip in TED-LIUM 2 dataset using the link above.
 - [L2-Arctic](https://psi.engr.tamu.edu/l2-arctic-corpus/)
+  - You can get L2-Arctic dataset using the link above.
+  - Speakers who were utilized for each native language are as follows:
+
+  Language | Speaker
+  --- | ---
+  Arabic | SKA
+  Mandarin | BWC
+  Hindi | RRBI
+  Korean | HKK
+  Spanish | EBVS
+  Vietnamese | PNV
 - [MS-SNSD](https://github.com/microsoft/MS-SNSD)
+  - All background noises used in the paper are included in res folder. (res/*.wav)
+  - You can make synthetic distribution shift datasets with the following command:
+  ```
+  python 
+  ```
 
 
 
-## Pre-traiend Models
+## Pre-trained Models
 - [CTC-based Model](https://huggingface.co/facebook/wav2vec2-base-960h)
 - [Conformer](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_conformer_ctc_small)
 - [Transducer](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_conformer_transducer_small)
