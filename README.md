@@ -16,6 +16,8 @@ This repository contains the official TensorFlow implementation of the following
 
 ### Environmental Setup 
 ```
+conda create -y -n tta python=3.7
+conda activate tta
 pip install -r requirements.txt
 ```
 
@@ -27,7 +29,7 @@ You have to download datasets by your own.
 
 
 
-### Pretraiend Models
+### Pre-trained Models
 
 
 
@@ -44,10 +46,6 @@ bash scripts/{dataset_name: LS/CH/CV/TD}.sh
 ### Contact
 If you have any questions or comments, feel free to contact us via changhun.kim@kaist.ac.kr.
 
-
-
-### License
-This project is licensed under the terms of the MIT license.
 
 
 
