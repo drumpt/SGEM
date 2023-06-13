@@ -1,8 +1,8 @@
 ### model
-asr: facebook/wav2vec2-base-960h
-processor: patrickvonplaten/wav2vec2-base-100h-with-lm
-# asr: pretrained_models/stt_en_conformer_ctc_small_ls.nemo
-# processor: pretrained_models/wav2vec2-base-100h-with-lm/snapshots/0612413f4d1532f2e50c039b2f014722ea59db4e/language_model
+# asr: facebook/wav2vec2-base-960h
+# processor: patrickvonplaten/wav2vec2-base-100h-with-lm
+asr: pretrained_models/stt_en_conformer_ctc_small_ls.nemo
+processor: pretrained_models/wav2vec2-base-100h-with-lm/snapshots/0612413f4d1532f2e50c039b2f014722ea59db4e/language_model
 # asr: pretrained_models/stt_en_conformer_transducer_small.nemo
 # processor: null
 
@@ -26,17 +26,17 @@ batch_size: 1
 
 ### device and amp
 device: cuda
-# use_amp: true
+use_amp: true
 
 ### logging
-log_dir: exps/tasper_ctc
+log_dir: exps/sgem_conformer
 
 ### seed for reproductivity
 seed: null
 
 ### optimizer & train hyparameters & learning rate scheduler
 optimizer: AdamW
-train_params: [feature] # currently supported: all, feature, LN, linear(linear probing), enc, dec
+train_params: [enc] # currently supported: all, feature, LN, linear(linear probing), enc, dec
 steps: 10
 episodic: true # load pretrained model again for every batch
 
@@ -51,7 +51,6 @@ lr_min: 2e-5
 method: [renyi_em, beam_search_negative_sampling]
 decoding_method: beam_search # greedy_search or beam_search
 lm_coef: 0.3
-kld_weight: 0.0625 # 0, 0.0625(1/16), 0.125(1/8), 0.25(1/4), 9.5(1/2), ...
 
 ### beam search
 beam_width: 5
@@ -64,11 +63,11 @@ not_blank: true
 certain_only: true
 
 ### renyi entropy minimization
-renyi_entropy_alpha: 1.5 # 1, 2, ..., inf
+renyi_entropy_alpha: 1.25 # 1, 2, ..., inf
 
 # negative sampling
 negative_sampling_method: ns3l # random, beam_candidate, ns3l
-ns_coef: 1
+ns_coef: 2
 ns_threshold: 0.04
 
 # thresholding

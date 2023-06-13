@@ -80,6 +80,8 @@ if __name__=="__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--cfg", default="../conf/noisyspeech_synthesizer.cfg", help="Read noisyspeech_synthesizer.cfg for all the details")
     parser.add_argument("--cfg_str", type=str, default="noisy_speech")
+    # parser.add_argument("--speech_dir", type=str, default="/home/server17/hdd/changhun_workspace/LibriSpeech")
+    # parser.add_argument("--snr_lower", type=int, default=10)
     args = parser.parse_args()
 
     cfgpath = os.path.join(os.path.dirname(__file__), args.cfg)
@@ -87,5 +89,5 @@ if __name__=="__main__":
     cfg = CP.ConfigParser()
     cfg._interpolation = CP.ExtendedInterpolation()
     cfg.read(cfgpath)
-    
+
     main(cfg._sections[args.cfg_str])
