@@ -73,6 +73,7 @@ pip install -r requirements.txt
 - [4-gram Language Model for CTC-based Model](https://huggingface.co/patrickvonplaten/wav2vec2-base-100h-with-lm)
   - You need to download language by your own using following command:
   ```
+  git lfs install
   git clone https://huggingface.co/patrickvonplaten/wav2vec2-base-100h-with-lm pretrained_models/wav2vec2-base-100h-with-lm
   ```
 
