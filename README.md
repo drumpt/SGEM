@@ -49,7 +49,7 @@ pip install -r requirements.txt
   Vietnamese | PNV
 - [MS-SNSD](https://github.com/microsoft/MS-SNSD)
   - All background noises used in the paper are included in res folder. (res/*.wav)
-  - Set ``speech_dir`` and ``snr_lower`` in ``noisyspeech_synthesizer.cfg``.
+  - Set ``speech_dir`` and ``snr_lower`` in ``conf/noisyspeech_synthesizer.cfg``.
   - You can make synthetic distribution shift datasets with the following command:
   ```
   python corpus/noisyspeech_synthesizer.py
