@@ -60,10 +60,10 @@ pip install -r requirements.txt
 ## Pre-trained Models
 - [CTC-based Model](https://huggingface.co/facebook/wav2vec2-base-960h)
   - CTC-based model will be automatically downloaded if you set ``asr`` as ``facebook/wav2vec2-base-960h``.
-- [Conformer](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_conformer_ctc_small)
+- [Conformer](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_conformer_ctc_small_ls)
   - You need to download conformer by your own using following command:
   ```
-  wget --content-disposition https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_conformer_ctc_small/versions/1.0.0rc1/zip -P pretrained_models
+  wget --content-disposition https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_conformer_ctc_small_ls/versions/1.0.0/zip -P pretrained_models
   ```
 - [Transducer](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_conformer_transducer_small)
   - You need to download transducer by your own using following command:
