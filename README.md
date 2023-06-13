@@ -14,10 +14,10 @@ This repository contains the official PyTorch implementation of the following pa
 
 
 
-## Environmental Setup 
+## Environmental Setup
 ```
-conda create -y -n tta python=3.7
-conda activate tta
+conda create -y -n sgem python=3.7
+conda activate sgem
 pip install -r requirements.txt
 ```
 
@@ -27,7 +27,7 @@ pip install -r requirements.txt
 - [LibriSpeech](https://www.openslr.org/12)
   - You can get test-other.tar.gz in LibriSpeech using the link above.
 - [CHiME-3](https://catalog.ldc.upenn.edu/LDC2017S24)
-  - You need to manually download CHiME-3 dataset using the link above with a *standard Linguistic Data Consortium account*.
+  - You need to manually download CHiME-3 dataset using the link above with a ``standard Linguistic Data Consortium account``.
 - [TED-LIUM 2](https://lium.univ-lemans.fr/ted-lium2/)
   - You can get TED-LIUM 2 dataset using the link above.
   - You also need to preprocess the data with data/preprocess_ted.py and data/preprocess_ted.sh.
@@ -49,28 +49,49 @@ pip install -r requirements.txt
   Vietnamese | PNV
 - [MS-SNSD](https://github.com/microsoft/MS-SNSD)
   - All background noises used in the paper are included in res folder. (res/*.wav)
+  - Set ``speech_dir`` and ``snr_lower`` in ``noisyspeech_synthesizer.cfg``.
   - You can make synthetic distribution shift datasets with the following command:
   ```
-  python 
+  python corpus/noisyspeech_synthesizer.py
   ```
 
 
 
 ## Pre-trained Models
 - [CTC-based Model](https://huggingface.co/facebook/wav2vec2-base-960h)
+  - CTC-based model will be automatically downloaded if you set ``asr`` as ``facebook/wav2vec2-base-960h``.
 - [Conformer](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_conformer_ctc_small)
+  - You need to download conformer by your own using following command:
+  ```
+  wget --content-disposition https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_conformer_ctc_small/versions/1.0.0rc1/zip -P pretrained_models
+  ```
 - [Transducer](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/stt_en_conformer_transducer_small)
+  - You need to download transducer by your own using following command:
+  ```
+  wget --content-disposition https://api.ngc.nvidia.com/v2/models/nvidia/nemo/stt_en_conformer_transducer_small/versions/1.6.0/zip -P pretrained_models
+  ```
 - [4-gram Language Model for CTC-based Model](https://huggingface.co/patrickvonplaten/wav2vec2-base-100h-with-lm)
+  - You need to download language by your own using following command:
+  ```
+  git clone https://huggingface.co/patrickvonplaten/wav2vec2-base-100h-with-lm pretrained_models/wav2vec2-base-100h-with-lm
+  ```
 
 
 
 ## Run
-The source ASR model is [w2v2-base fine-tuned on Librispeech 960 hours](https://huggingface.co/facebook/wav2vec2-base-960h). The pre-trained model is imported by Huggingface.
+You can run main.py using the command below:
+```
+python main.py \
+    --config-name [CONFIG.YAML] \
+    dataset_name=[DATASET_NAME] \
+    dataset_dir=[DATASET_DIR] \
+```
+Currently available parameters are as follows:
 
-Run SUTA on different datasets:
-```
-bash scripts/{dataset_name: LS/CH/CV/TD}.sh
-```
+  Parameter | Value
+  --- | ---
+  CONFIG.YAML | config.yaml, config_{sgem\|suta}_{ctc\|conformer\|transducer}.yaml
+  DATASET_NAME | librispeech, chime, ted, commonvoice, valentini, l2arctic
 
 
 

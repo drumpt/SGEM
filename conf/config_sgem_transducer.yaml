@@ -1,10 +1,10 @@
 ### model
 # asr: facebook/wav2vec2-base-960h
 # processor: patrickvonplaten/wav2vec2-base-100h-with-lm
-asr: pretrained_models/stt_en_conformer_ctc_small_ls.nemo
-processor: pretrained_models/wav2vec2-base-100h-with-lm/snapshots/0612413f4d1532f2e50c039b2f014722ea59db4e/language_model
-# asr: pretrained_models/stt_en_conformer_transducer_small.nemo
-# processor: null
+# asr: pretrained_models/stt_en_conformer_ctc_small_ls.nemo
+# processor: pretrained_models/wav2vec2-base-100h-with-lm/snapshots/0612413f4d1532f2e50c039b2f014722ea59db4e/language_model
+asr: pretrained_models/stt_en_conformer_transducer_small.nemo
+processor: null
 
 ### dataset
 # dataset_name: librispeech
@@ -24,12 +24,11 @@ noise_snr: 10
 sample_rate: 16000
 batch_size: 1
 
-### device and amp
+### device
 device: cuda
-use_amp: true
 
 ### logging
-log_dir: exps/tasper_conformer
+log_dir: exps/sgem_transducer
 
 ### seed for reproductivity
 seed: null
@@ -40,22 +39,22 @@ train_params: [enc] # currently supported: all, feature, LN, linear(linear probi
 steps: 10
 episodic: true # load pretrained model again for every batch
 
-lr: 4e-5
+lr: 4e-6
 scheduler: CosineAnnealingLR # null or CosineAnnealingLR
 t_max: 10
-lr_min: 2e-5
+lr_min: 2e-6
 
 ##################################################################
 ### methods & other hyperparameters
 ## currently supported methods: original, em_uncertainty, em_sparse, greedy_pseudo_labeling, ctc, beam_search_max, beam_search_all, beam_search_negative_sampling, diversity_maximization, renyi_em
 method: [renyi_em, beam_search_negative_sampling]
 decoding_method: beam_search # greedy_search or beam_search
-lm_coef: 0.3
+lm_coef: 0
 
 ### beam search
-beam_width: 5
+beam_width: 3
 num_positives: 1 # for beam_search_all
-num_negatives: 4 # for beam_candidate for negtive_sampling
+num_negatives: 2 # for beam_candidate for negtive_sampling
 
 temp: 2.5 # temperature scaling
 em_coef: 0.3 # for balancing entropy minimization and minimum class confusion for baseline
@@ -67,7 +66,7 @@ renyi_entropy_alpha: 1.25 # 1, 2, ..., inf
 
 # negative sampling
 negative_sampling_method: ns3l # random, beam_candidate, ns3l
-ns_coef: 2
+ns_coef: 0.5
 ns_threshold: 0.04
 
 # thresholding
