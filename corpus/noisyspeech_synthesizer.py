@@ -30,15 +30,6 @@ def main(cfg):
     total_hours = float(cfg["total_hours"])
     audio_length = float(cfg["audio_length"])
     silence_length = float(cfg["silence_length"])
-    # noisyspeech_dir = os.path.join(os.path.dirname(__file__), 'NoisySpeech_training')
-    # if not os.path.exists(noisyspeech_dir):
-    #     os.makedirs(noisyspeech_dir)
-    # clean_proc_dir = os.path.join(os.path.dirname(__file__), 'CleanSpeech_training')
-    # if not os.path.exists(clean_proc_dir):
-    #     os.makedirs(clean_proc_dir)
-    # noise_proc_dir = os.path.join(os.path.dirname(__file__), 'Noise_training')
-    # if not os.path.exists(noise_proc_dir):
-    #     os.makedirs(noise_proc_dir)
         
     total_secs = total_hours*60*60
     total_samples = int(total_secs * fs)
@@ -80,8 +71,6 @@ if __name__=="__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--cfg", default="../conf/noisyspeech_synthesizer.cfg", help="Read noisyspeech_synthesizer.cfg for all the details")
     parser.add_argument("--cfg_str", type=str, default="noisy_speech")
-    # parser.add_argument("--speech_dir", type=str, default="/home/server17/hdd/changhun_workspace/LibriSpeech")
-    # parser.add_argument("--snr_lower", type=int, default=10)
     args = parser.parse_args()
 
     cfgpath = os.path.join(os.path.dirname(__file__), args.cfg)
