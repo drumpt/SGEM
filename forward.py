@@ -364,7 +364,6 @@ def forward_ctc_or_conformer_with_labels(
     return torch.tensor(np.array(beams[0][-1])).to(args.device)
 
 
-
 def forward_attn(args, model, wavs, lens, labels):
     def decoder_forward_step(model, inp_tokens, memory, enc_states, enc_lens):
         """Performs a step in the implemented beamsearcher."""
