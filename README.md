@@ -98,7 +98,7 @@ Currently available parameters are as follows:
 
 ## Citation
 ```
-@inproceedings{kim2023sgem,
+@inproceedings{sgem,
   title={{SGEM}: Test-Time Adaptation for Automatic Speech Recognition via Sequential-Level Generalized Entropy Minimization},
   author={Changhun Kim and Joonhyung Park and Hajin Shim, and Eunho Yang},
   booktitle={Conference of the International Speech Communication Association (INTERSPEECH)},
