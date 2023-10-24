@@ -96,6 +96,11 @@ Currently available parameters are as follows:
 
 
 
+## Contact
+If you have any questions or comments, feel free to contact us via changhun.kim@kaist.ac.kr.
+
+
+
 ## Citation
 ```
 @inproceedings{sgem,
@@ -108,5 +113,8 @@ Currently available parameters are as follows:
 
 
 
-## Contact
-If you have any questions or comments, feel free to contact us via changhun.kim@kaist.ac.kr.
+## Acknowledgement
+```
+This work was supported by Institute of Information & communications Technology Planning & Evaluation (IITP) grant funded by the Korea government(MSIT) 
+(No.2019-0-00075, Artificial Intelligence Graduate School Program(KAIST)).
+```
