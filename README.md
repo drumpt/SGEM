@@ -31,8 +31,8 @@ pip install -r requirements.txt
 - [TED-LIUM 2](https://lium.univ-lemans.fr/ted-lium2/)
   - You can get TED-LIUM 2 dataset using the link above.
   - You also need to preprocess the data with data/preprocess_ted.py and data/preprocess_ted.sh.
-- [CommonVoice](https://tinyurl.com/cvjune2020)
-  - You can get en.tar.gz in CommonVoice dataset using the link above.
+- [CommonVoice](https://commonvoice.mozilla.org/en/datasets)
+  - You can get Common Voice Corpus 5.1 dataset using the link above.
 - [Valentini](https://datashare.ed.ac.uk/handle/10283/2791)
   - You can get noisy_testset_wav.zip and testset_txt.zip in TED-LIUM 2 dataset using the link above.
 - [L2-Arctic](https://psi.engr.tamu.edu/l2-arctic-corpus/)
