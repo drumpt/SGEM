@@ -103,7 +103,7 @@ If you have any questions or comments, feel free to contact us via changhun.kim@
 
 ## Citation
 ```
-@inproceedings{sgem,
+@inproceedings{kim2023sgem,
   title={{SGEM}: Test-Time Adaptation for Automatic Speech Recognition via Sequential-Level Generalized Entropy Minimization},
   author={Kim, Changhun and Park, Joonhyung and Shim, Hajin and Yang, Eunho},
   booktitle={Conference of the International Speech Communication Association (INTERSPEECH)},
